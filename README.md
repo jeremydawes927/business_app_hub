@@ -1,6 +1,6 @@
 # Business App Hub
 
-Business App Hub is a lightweight launcher and future updater for small custom company apps.
+Business App Hub is a lightweight launcher, installer, and update portal for small custom company apps.
 
 The hub is built around a Steam-inspired portal layout:
 
@@ -11,10 +11,13 @@ The hub is built around a Steam-inspired portal layout:
 - shows a `Find Apps` page for the shared company catalog
 - shows a `My Apps` page for apps downloaded on the current computer
 - shows app icons, descriptions, allowed releases, and source folders
+- installs approved release ZIPs into a local app-data install folder
+- launches installed apps from the hub or from hub-managed Desktop shortcuts
+- lets local users delete installed copies without changing the shared catalog
+- includes a publish page for adding new apps and approved app releases to the shared hub
 - provides a bottom update/download bar with queue status and progress
+- checks the public GitHub releases feed for new Business App Hub versions
 - stores only local preferences and installed-app status in `%LOCALAPPDATA%\Business App Hub`
-
-Real ZIP extraction, rollback, and launch wiring are intentionally left for the next phase. The current download queue is a safe UI scaffold that marks an app as available in `My Apps` on the local computer.
 
 ## Portal Layout
 
@@ -22,15 +25,17 @@ Real ZIP extraction, rollback, and launch wiring are intentionally left for the 
 
 Clicking an app opens its detail page. The description editor saves back to the shared company `catalog.json`, so description changes are shared with other employees in the same company folder.
 
-`My Apps` is the local library. It only shows apps that this computer has downloaded or installed. That local list is stored in:
+`My Apps` is the local library. It only shows apps that this computer has installed. Local install records are stored in:
 
 ```text
 %LOCALAPPDATA%\Business App Hub\settings.json
 ```
 
-The bottom `UPDATES` bar is the update queue surface. It flashes while work is active, shows queue count, and displays progress for the current app. Later phases can replace the safe simulated download with real ZIP extraction and version switching.
+The bottom `UPDATES` bar is the update queue surface. It flashes while work is active, shows queue count, displays progress for the current app, and reveals an **Update Hub** button when the public GitHub release check finds a newer hub version.
 
-The Settings page includes **Create Desktop Shortcut**, which creates a Windows `.lnk` pointing to the current app executable. It does not copy the app files to the Desktop, so future updater work can safely target the app install folder instead of treating the Desktop as an install directory.
+The Settings page includes **Create Desktop Shortcut**, which creates a Windows `.lnk` pointing back through the hub. App detail pages can also create app-specific Desktop shortcuts. Those app shortcuts open the app through Business App Hub, so the Desktop stays clean and the hub can keep track of the current local install.
+
+The `Publish Apps` page can create new shared app entries or publish updates to existing app entries. It accepts a `.zip`, `.exe`, or folder, writes the package into the app's `Releases` folder, calculates a SHA-256 hash, updates `catalog.json`, and writes that app's `latest.json`.
 
 Company-specific app metadata belongs in the company OneDrive/SharePoint folder, not in GitHub:
 
@@ -60,7 +65,7 @@ For now the empty catalog should be:
 }
 ```
 
-Later, each app can either live inside `Apps/` or point to an existing release folder.
+Each app can live inside `Apps/` or point to an existing release folder through `source_folder`.
 
 ## App Icons
 
@@ -100,7 +105,7 @@ Business App Hub/
 
 The fallback search also checks `hub_header.png`, `portal_header.png`, `background.png`, and the same names inside `Business App Hub/assets/`. Company-specific images stay in OneDrive or SharePoint, while the public repo can keep the generic app shell.
 
-## Example Future Catalog Entry
+## Example Catalog Entry
 
 ```json
 {
@@ -158,7 +163,7 @@ Build an EXE:
 Build and write a release ZIP/manifest to a release folder:
 
 ```powershell
-.\build_exe.ps1 -Version "0.1.1" -ReleaseRoot "C:\Path\To\Business App Hub"
+.\build_exe.ps1 -Version "0.1.2" -ReleaseRoot "C:\Path\To\Business App Hub"
 ```
 
 ## First-Time Company Setup
@@ -192,6 +197,6 @@ Business App Hub/
 
 5. On first launch, the app will try to find the shared `Business App Hub` folder automatically. If it finds the wrong folder or cannot find one, choose the correct folder with the Browse button.
 
-6. When apps are ready to publish, add each app's release ZIPs and catalog entry to the shared folder. The hub will read from that folder and show the available apps to users.
+6. When apps are ready to publish, use the **Publish Apps** tab to create a new app entry or add a new approved version to an existing app.
 
 The GitHub project contains the generic hub app only. Your company's app catalog, release ZIPs, documents, credentials, and private files should stay in your own shared company folder.

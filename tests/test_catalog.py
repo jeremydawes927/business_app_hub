@@ -126,6 +126,95 @@ class CatalogTests(unittest.TestCase):
         shortcut_path = hub.desktop_shortcut_path()
         self.assertEqual("Business App Hub.lnk", shortcut_path.name)
 
+    def test_version_compare_detects_newer_release(self):
+        self.assertTrue(hub.is_newer_version("v0.1.3", "0.1.2"))
+        self.assertFalse(hub.is_newer_version("0.1.2", "0.1.2"))
+        self.assertFalse(hub.is_newer_version("0.1.1", "0.1.2"))
+
+    def test_github_page_url_normalizes_to_releases_api(self):
+        self.assertEqual(
+            "https://api.github.com/repos/example-user/example-app/releases",
+            hub.normalize_github_releases_url(
+                "https://github.com/example-user/example-app/releases"
+            ),
+        )
+
+    def test_latest_api_url_falls_back_to_releases_list_url(self):
+        self.assertEqual(
+            "https://api.github.com/repos/example-user/example-app/releases",
+            hub.release_list_api_url(
+                "https://api.github.com/repos/example-user/example-app/releases/latest"
+            ),
+        )
+
+    def test_publish_new_app_from_exe_writes_catalog_latest_and_zip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            (folder / "catalog.json").write_text(
+                json.dumps({"hub_version": "1.0.0", "apps": []}),
+                encoding="utf-8",
+            )
+            package = folder / "Demo Tool.exe"
+            package.write_bytes(b"fake executable")
+
+            app_id = hub.publish_app_package(
+                folder,
+                mode="Create new app",
+                existing_app_id="",
+                app_name="Demo Tool",
+                app_id="",
+                description="A test app.",
+                version="1.2.3",
+                release_name="First release",
+                executable_name="",
+                package_input=package,
+                icon_input=None,
+            )
+
+            catalog = hub.load_catalog(folder)
+            self.assertEqual("demo-tool", app_id)
+            self.assertEqual("Demo Tool", catalog.apps[0].name)
+            self.assertEqual("1.2.3", catalog.apps[0].default_version)
+            self.assertEqual(("1.2.3",), catalog.apps[0].allowed_versions)
+            self.assertEqual("Demo Tool.exe", catalog.apps[0].executable_name)
+            release = catalog.apps[0].releases[0]
+            self.assertEqual("First release", release.notes)
+            zip_path = folder / catalog.apps[0].source_folder / release.package
+            self.assertTrue(zip_path.is_file())
+            self.assertTrue((folder / catalog.apps[0].source_folder / "latest.json").is_file())
+
+    def test_install_app_release_extracts_executable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir) / "hub"
+            install_root = Path(temp_dir) / "installs"
+            folder.mkdir()
+            (folder / "catalog.json").write_text(
+                json.dumps({"hub_version": "1.0.0", "apps": []}),
+                encoding="utf-8",
+            )
+            package = Path(temp_dir) / "Demo Tool.exe"
+            package.write_bytes(b"fake executable")
+            app_id = hub.publish_app_package(
+                folder,
+                mode="Create new app",
+                existing_app_id="",
+                app_name="Demo Tool",
+                app_id="",
+                description="A test app.",
+                version="1.2.3",
+                release_name="First release",
+                executable_name="",
+                package_input=package,
+                icon_input=None,
+            )
+            app = hub.load_catalog(folder).apps[0]
+
+            record = hub.install_app_release(folder, app, install_root=install_root)
+
+            self.assertEqual(app_id, record.app_id)
+            self.assertTrue(Path(record.executable_path).is_file())
+            self.assertTrue(Path(record.install_folder).is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()
