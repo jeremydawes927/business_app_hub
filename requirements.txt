@@ -1,0 +1,2 @@
+# Runtime dependencies:
+# Business App Hub currently uses only the Python standard library.
