@@ -19,7 +19,7 @@ import tkinter as tk
 
 
 APP_NAME = "Business App Hub"
-APP_VERSION = "0.1.2"
+APP_VERSION = "0.1.3"
 HUB_FOLDER_NAME = "Business App Hub"
 FONT_FAMILY = "Georgia"
 APP_DATA_FOLDER = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Business App Hub"
@@ -586,6 +586,39 @@ def app_install_folder(app_id: str, install_root: Path = INSTALLS_FOLDER) -> Pat
     return normalize_path(install_root / safe_app_folder_name(app_id))
 
 
+def safe_version_folder_name(version: str) -> str:
+    safe = "".join(
+        character if character.isalnum() or character in "._-" else "_"
+        for character in version.strip()
+    )
+    return safe.strip("._-") or "version"
+
+
+def app_version_install_folder(
+    app_id: str,
+    version: str,
+    install_root: Path = INSTALLS_FOLDER,
+) -> Path:
+    return normalize_path(app_install_folder(app_id, install_root) / safe_version_folder_name(version))
+
+
+def next_available_version_install_folder(
+    app_id: str,
+    version: str,
+    install_root: Path = INSTALLS_FOLDER,
+) -> Path:
+    base_folder = app_install_folder(app_id, install_root)
+    version_name = safe_version_folder_name(version)
+    candidate = base_folder / version_name
+    if not candidate.exists():
+        return normalize_path(candidate)
+    for index in range(2, 1000):
+        candidate = base_folder / f"{version_name}-{index}"
+        if not candidate.exists():
+            return normalize_path(candidate)
+    return normalize_path(base_folder / f"{version_name}-{os.getpid()}")
+
+
 def is_path_inside(path: Path, parent: Path) -> bool:
     try:
         normalize_path(path).relative_to(normalize_path(parent))
@@ -658,16 +691,35 @@ def validate_release_hash(package_path: Path, release: AppRelease) -> None:
 def find_installed_executable(install_folder: Path, app: HubApp) -> Path | None:
     if app.executable_name:
         configured = Path(app.executable_name)
+        configured_names = {configured.name}
+        if configured.suffix.lower() != ".exe":
+            configured_names.add(f"{configured.name}.exe")
         if configured.is_absolute() and configured.is_file():
             return normalize_path(configured)
-        direct = install_folder / configured
-        if direct.is_file():
-            return normalize_path(direct)
-        for candidate in install_folder.rglob(configured.name):
-            if candidate.is_file():
+        for name in configured_names:
+            direct = install_folder / name
+            if direct.is_file():
+                return normalize_path(direct)
+        for candidate in install_folder.rglob("*.exe"):
+            if candidate.name in configured_names and not is_helper_executable(candidate, install_folder):
                 return normalize_path(candidate)
-    executables = sorted(install_folder.rglob("*.exe"))
+    executables = sorted(
+        (candidate for candidate in install_folder.rglob("*.exe") if not is_helper_executable(candidate, install_folder)),
+        key=lambda candidate: (len(candidate.relative_to(install_folder).parts), candidate.name.lower()),
+    )
     return normalize_path(executables[0]) if executables else None
+
+
+def is_helper_executable(executable: Path, install_folder: Path) -> bool:
+    name = executable.name.lower()
+    if name in {"tesseract.exe", "python.exe", "pythonw.exe"}:
+        return True
+    try:
+        parts = [part.lower() for part in executable.relative_to(install_folder).parts]
+    except ValueError:
+        return False
+    helper_parts = {"_internal", "tools", "tesseract"}
+    return bool(helper_parts.intersection(parts[:-1]))
 
 
 def install_app_release(
@@ -684,11 +736,17 @@ def install_app_release(
             f"Could not find the release ZIP for {app.name} {release.version}."
         )
     validate_release_hash(package_path, release)
-    install_folder = app_install_folder(app.app_id, install_root)
-    if not is_path_inside(install_folder, install_root):
+    install_base = app_install_folder(app.app_id, install_root)
+    install_folder = next_available_version_install_folder(
+        app.app_id,
+        release.version,
+        install_root,
+    )
+    if not is_path_inside(install_base, install_root) or not is_path_inside(
+        install_folder,
+        install_root,
+    ):
         raise ValueError("Refusing to install outside the hub install folder.")
-    if install_folder.exists():
-        shutil.rmtree(install_folder)
     install_folder.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(package_path) as zip_file:
@@ -713,13 +771,16 @@ def install_app_release(
 def delete_app_install(app: HubApp, install_root: Path = INSTALLS_FOLDER) -> None:
     records = load_install_records()
     record = records.get(app.app_id)
-    install_folder = (
-        normalize_path(Path(record.install_folder))
-        if record is not None
-        else app_install_folder(app.app_id, install_root)
-    )
     root = normalize_path(install_root)
-    if install_folder.exists():
+    app_folder = app_install_folder(app.app_id, install_root)
+    targets = [app_folder]
+    if record is not None:
+        record_folder = normalize_path(Path(record.install_folder))
+        if record_folder != app_folder and not is_path_inside(record_folder, app_folder):
+            targets.append(record_folder)
+    for install_folder in targets:
+        if not install_folder.exists():
+            continue
         if not is_path_inside(install_folder, root):
             raise ValueError("Refusing to delete outside the hub install folder.")
         shutil.rmtree(install_folder)
@@ -2320,7 +2381,24 @@ class SteamStyleBusinessAppHub(tk.Tk):
         self.installed_app_ids = load_installed_app_ids()
 
     def install_record_for(self, app: HubApp) -> InstallRecord | None:
-        return self.install_records.get(app.app_id)
+        record = self.install_records.get(app.app_id)
+        if record is None:
+            return None
+        install_folder = Path(record.install_folder)
+        executable = Path(record.executable_path)
+        if is_helper_executable(executable, install_folder):
+            repaired = find_installed_executable(install_folder, app)
+            if repaired is not None and repaired != executable:
+                record = InstallRecord(
+                    app_id=record.app_id,
+                    version=record.version,
+                    install_folder=record.install_folder,
+                    executable_path=str(repaired),
+                )
+                save_install_record(record)
+                self.install_records[record.app_id] = record
+                self.installed_app_ids.add(record.app_id)
+        return record
 
     def is_app_installed(self, app: HubApp) -> bool:
         record = self.install_record_for(app)

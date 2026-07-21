@@ -215,6 +215,61 @@ class CatalogTests(unittest.TestCase):
             self.assertTrue(Path(record.executable_path).is_file())
             self.assertTrue(Path(record.install_folder).is_dir())
 
+    def test_install_app_release_keeps_existing_app_folder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir) / "hub"
+            install_root = Path(temp_dir) / "installs"
+            folder.mkdir()
+            (folder / "catalog.json").write_text(
+                json.dumps({"hub_version": "1.0.0", "apps": []}),
+                encoding="utf-8",
+            )
+            legacy_folder = install_root / "demo-tool"
+            legacy_folder.mkdir(parents=True)
+            legacy_marker = legacy_folder / "old-version.txt"
+            legacy_marker.write_text("still running", encoding="utf-8")
+            package = Path(temp_dir) / "Demo Tool.exe"
+            package.write_bytes(b"fake executable")
+            hub.publish_app_package(
+                folder,
+                mode="Create new app",
+                existing_app_id="",
+                app_name="Demo Tool",
+                app_id="",
+                description="A test app.",
+                version="1.2.3",
+                release_name="First release",
+                executable_name="",
+                package_input=package,
+                icon_input=None,
+            )
+            app = hub.load_catalog(folder).apps[0]
+
+            record = hub.install_app_release(folder, app, install_root=install_root)
+
+            self.assertTrue(legacy_marker.is_file())
+            self.assertNotEqual(legacy_folder.resolve(), Path(record.install_folder).resolve())
+            self.assertTrue(Path(record.install_folder).is_dir())
+
+    def test_find_installed_executable_ignores_bundled_helper_exes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_folder = Path(temp_dir) / "demo-tool"
+            helper_folder = install_folder / "_internal" / "tools" / "tesseract"
+            helper_folder.mkdir(parents=True)
+            helper_exe = helper_folder / "tesseract.exe"
+            helper_exe.write_bytes(b"helper")
+            app_exe = install_folder / "Demo Tool.exe"
+            app_exe.write_bytes(b"app")
+            app = hub.HubApp(
+                app_id="demo-tool",
+                name="Demo Tool",
+                executable_name="Demo Tool",
+            )
+
+            selected = hub.find_installed_executable(install_folder, app)
+
+            self.assertEqual(app_exe.resolve(), selected)
+
 
 if __name__ == "__main__":
     unittest.main()
