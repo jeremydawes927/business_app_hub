@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "0.1.0",
+  [string]$Version = "0.1.1",
   [string]$ReleaseRoot = ""
 )
 
@@ -9,6 +9,11 @@ $sourcePath = Join-Path $projectRoot "src\business_app_hub.py"
 $assetsPath = Join-Path $projectRoot "assets"
 $distPath = Join-Path $projectRoot "dist"
 $buildPath = Join-Path $projectRoot "build"
+$pythonExe = (Get-Command python).Source
+$pythonRoot = Split-Path -Parent $pythonExe
+$pythonLibTkinterPath = Join-Path $pythonRoot "Lib\tkinter"
+$pythonTclPath = Join-Path $pythonRoot "tcl"
+$pythonDllPath = Join-Path $pythonRoot "DLLs"
 
 if (-not (Test-Path -LiteralPath $sourcePath)) {
   throw "Could not find source file: $sourcePath"
@@ -18,6 +23,10 @@ $pyInstallerArgs = @(
   "--noconfirm",
   "--clean",
   "--windowed",
+  "--hidden-import", "tkinter",
+  "--hidden-import", "tkinter.filedialog",
+  "--hidden-import", "tkinter.messagebox",
+  "--hidden-import", "tkinter.ttk",
   "--name", "Business App Hub",
   "--distpath", $distPath,
   "--workpath", $buildPath
@@ -25,6 +34,21 @@ $pyInstallerArgs = @(
 
 if (Test-Path -LiteralPath $assetsPath) {
   $pyInstallerArgs += @("--add-data", "$assetsPath;assets")
+}
+
+if (Test-Path -LiteralPath $pythonLibTkinterPath) {
+  $pyInstallerArgs += @("--add-data", "$pythonLibTkinterPath;tkinter")
+}
+
+if (Test-Path -LiteralPath $pythonTclPath) {
+  $pyInstallerArgs += @("--add-data", "$pythonTclPath;tcl")
+}
+
+foreach ($binaryName in @("_tkinter.pyd", "tcl86t.dll", "tk86t.dll")) {
+  $binaryPath = Join-Path $pythonDllPath $binaryName
+  if (Test-Path -LiteralPath $binaryPath) {
+    $pyInstallerArgs += @("--add-binary", "$binaryPath;.")
+  }
 }
 
 $pyInstallerArgs += $sourcePath

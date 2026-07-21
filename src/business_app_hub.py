@@ -12,7 +12,7 @@ import tkinter as tk
 
 
 APP_NAME = "Business App Hub"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 HUB_FOLDER_NAME = "Business App Hub"
 FONT_FAMILY = "Georgia"
 APP_DATA_FOLDER = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Business App Hub"
@@ -423,6 +423,53 @@ def bundled_asset_path(name: str) -> Path | None:
         if candidate.is_file():
             return normalize_path(candidate)
     return None
+
+
+def powershell_string(value: str | Path) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def running_app_shortcut_target() -> tuple[Path, str, Path]:
+    if getattr(sys, "frozen", False):
+        executable = Path(sys.executable)
+        return executable, "", executable.parent
+    script = Path(__file__).resolve()
+    return Path(sys.executable), f'"{script}"', script.parent.parent
+
+
+def desktop_shortcut_path() -> Path:
+    desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
+    return desktop / f"{APP_NAME}.lnk"
+
+
+def create_desktop_shortcut_file() -> Path:
+    if not sys.platform.startswith("win"):
+        raise RuntimeError("Desktop shortcut creation is currently supported on Windows only.")
+    shortcut_path = desktop_shortcut_path()
+    shortcut_path.parent.mkdir(parents=True, exist_ok=True)
+    target, arguments, working_dir = running_app_shortcut_target()
+    script = "\n".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            "$shell = New-Object -ComObject WScript.Shell",
+            f"$shortcut = $shell.CreateShortcut({powershell_string(shortcut_path)})",
+            f"$shortcut.TargetPath = {powershell_string(target)}",
+            f"$shortcut.Arguments = {powershell_string(arguments)}",
+            f"$shortcut.WorkingDirectory = {powershell_string(working_dir)}",
+            f"$shortcut.IconLocation = {powershell_string(target)}",
+            "$shortcut.Save()",
+        ]
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "Unknown shortcut creation error.").strip()
+        raise RuntimeError(detail)
+    return shortcut_path
 
 
 def open_path(path: Path) -> None:
@@ -1714,6 +1761,43 @@ class SteamStyleBusinessAppHub(tk.Tk):
             justify="left",
         ).grid(row=3, column=1, columnspan=3, sticky="w", pady=(12, 0))
 
+        shortcut_box = tk.Frame(
+            page,
+            bg=COLORS["panel_alt"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            padx=18,
+            pady=16,
+        )
+        shortcut_box.grid(row=3, column=0, sticky="ew", pady=(18, 0))
+        shortcut_box.columnconfigure(0, weight=1)
+        tk.Label(
+            shortcut_box,
+            text="Desktop Shortcut",
+            bg=COLORS["panel_alt"],
+            fg=COLORS["text"],
+            font=(FONT_FAMILY, 12, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            shortcut_box,
+            text=(
+                "Creates a Desktop .lnk that points to this app. The app files stay in their "
+                "install folder, which keeps future updates away from the Desktop."
+            ),
+            bg=COLORS["panel_alt"],
+            fg=COLORS["muted"],
+            font=(FONT_FAMILY, 9),
+            wraplength=900,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.portal_button(
+            shortcut_box,
+            "Create Desktop Shortcut",
+            self.create_desktop_shortcut,
+            compact=True,
+            accent=True,
+        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
+
     def portal_panel(self, parent: tk.Widget) -> tk.Frame:
         return tk.Frame(
             parent,
@@ -2703,6 +2787,14 @@ class SteamStyleBusinessAppHub(tk.Tk):
 
     def open_github_help(self) -> None:
         webbrowser.open("https://github.com/")
+
+    def create_desktop_shortcut(self) -> None:
+        try:
+            shortcut_path = create_desktop_shortcut_file()
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Could not create Desktop shortcut:\n\n{exc}")
+            return
+        messagebox.showinfo(APP_NAME, f"Desktop shortcut created:\n\n{shortcut_path}")
 
 
 def main() -> None:

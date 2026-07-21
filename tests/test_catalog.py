@@ -119,6 +119,13 @@ class CatalogTests(unittest.TestCase):
             (folder / "catalog.json").write_text('{"apps": []}', encoding="utf-8")
             self.assertTrue(hub.is_valid_hub_folder(folder))
 
+    def test_powershell_string_escapes_apostrophes(self):
+        self.assertEqual("'Bob''s Folder'", hub.powershell_string("Bob's Folder"))
+
+    def test_desktop_shortcut_uses_app_name(self):
+        shortcut_path = hub.desktop_shortcut_path()
+        self.assertEqual("Business App Hub.lnk", shortcut_path.name)
+
 
 if __name__ == "__main__":
     unittest.main()

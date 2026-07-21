@@ -30,6 +30,8 @@ Clicking an app opens its detail page. The description editor saves back to the 
 
 The bottom `UPDATES` bar is the update queue surface. It flashes while work is active, shows queue count, and displays progress for the current app. Later phases can replace the safe simulated download with real ZIP extraction and version switching.
 
+The Settings page includes **Create Desktop Shortcut**, which creates a Windows `.lnk` pointing to the current app executable. It does not copy the app files to the Desktop, so future updater work can safely target the app install folder instead of treating the Desktop as an install directory.
+
 Company-specific app metadata belongs in the company OneDrive/SharePoint folder, not in GitHub:
 
 - `catalog.json`
@@ -156,7 +158,7 @@ Build an EXE:
 Build and write a release ZIP/manifest to a release folder:
 
 ```powershell
-.\build_exe.ps1 -Version "0.1.0" -ReleaseRoot "C:\Path\To\Business App Hub"
+.\build_exe.ps1 -Version "0.1.1" -ReleaseRoot "C:\Path\To\Business App Hub"
 ```
 
 ## First-Time Company Setup
