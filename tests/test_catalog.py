@@ -147,6 +147,24 @@ class CatalogTests(unittest.TestCase):
             ),
         )
 
+    def test_release_summary_finds_zip_asset(self):
+        summary = hub.release_summary_from_payload(
+            {
+                "tag_name": "0.1.4",
+                "html_url": "https://github.com/example/business_app_hub/releases/tag/0.1.4",
+                "assets": [
+                    {
+                        "name": "Business App Hub 0.1.4.zip",
+                        "browser_download_url": "https://example.test/download.zip",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual("0.1.4", summary["tag"])
+        self.assertEqual("Business App Hub 0.1.4.zip", summary["asset_name"])
+        self.assertEqual("https://example.test/download.zip", summary["asset_url"])
+
     def test_publish_new_app_from_exe_writes_catalog_latest_and_zip(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             folder = Path(temp_dir)
@@ -182,6 +200,116 @@ class CatalogTests(unittest.TestCase):
             zip_path = folder / catalog.apps[0].source_folder / release.package
             self.assertTrue(zip_path.is_file())
             self.assertTrue((folder / catalog.apps[0].source_folder / "latest.json").is_file())
+
+    def test_publish_new_app_accepts_png_and_ico_icons(self):
+        for icon_name in ("demo.png", "demo.ico"):
+            with self.subTest(icon_name=icon_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    folder = Path(temp_dir)
+                    (folder / "catalog.json").write_text(
+                        json.dumps({"hub_version": "1.0.0", "apps": []}),
+                        encoding="utf-8",
+                    )
+                    package = folder / "Demo Tool.exe"
+                    package.write_bytes(b"fake executable")
+                    icon = folder / icon_name
+                    icon.write_bytes(b"fake icon")
+
+                    hub.publish_app_package(
+                        folder,
+                        mode="Create new app",
+                        existing_app_id="",
+                        app_name="Demo Tool",
+                        app_id="",
+                        description="A test app.",
+                        version="1.2.3",
+                        release_name="First release",
+                        executable_name="",
+                        package_input=package,
+                        icon_input=icon,
+                    )
+
+                    app = hub.load_catalog(folder).apps[0]
+                    self.assertEqual(icon_name, app.icon_path)
+                    self.assertTrue((folder / app.source_folder / icon_name).is_file())
+
+    def test_update_app_icon_only_does_not_change_releases(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            (folder / "catalog.json").write_text(
+                json.dumps({"hub_version": "1.0.0", "apps": []}),
+                encoding="utf-8",
+            )
+            package = folder / "Demo Tool.exe"
+            package.write_bytes(b"fake executable")
+            first_icon = folder / "first.png"
+            first_icon.write_bytes(b"fake icon")
+            second_icon = folder / "second.ico"
+            second_icon.write_bytes(b"fake icon")
+            hub.publish_app_package(
+                folder,
+                mode="Create new app",
+                existing_app_id="",
+                app_name="Demo Tool",
+                app_id="",
+                description="A test app.",
+                version="1.2.3",
+                release_name="First release",
+                executable_name="",
+                package_input=package,
+                icon_input=first_icon,
+            )
+
+            hub.update_app_icon_only(folder, "demo-tool", second_icon)
+
+            app = hub.load_catalog(folder).apps[0]
+            self.assertEqual("second.ico", app.icon_path)
+            self.assertEqual(("1.2.3",), tuple(release.version for release in app.releases))
+            self.assertTrue((folder / app.source_folder / "second.ico").is_file())
+
+    def test_shortcut_icon_prefers_catalog_ico_icon(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            app_folder = folder / "Apps" / "Demo Tool"
+            app_folder.mkdir(parents=True)
+            icon = app_folder / "icon.ico"
+            icon.write_bytes(b"fake ico path test")
+            app = hub.HubApp(
+                app_id="demo-tool",
+                name="Demo Tool",
+                source_folder="Apps/Demo Tool",
+                icon_path="icon.ico",
+            )
+
+            self.assertEqual(icon.resolve(), hub.resolve_app_shortcut_icon_path(folder, app))
+
+    def test_shortcut_icon_converts_png_to_cached_ico(self):
+        if hub.Image is None:
+            self.skipTest("Pillow is not installed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            app_folder = folder / "Apps" / "Demo Tool"
+            app_folder.mkdir(parents=True)
+            png_icon = app_folder / "icon.png"
+            hub.Image.new("RGBA", (32, 32), (104, 184, 255, 255)).save(png_icon)
+            cache_folder = folder / "ShortcutIcons"
+            original_cache_folder = hub.SHORTCUT_ICON_FOLDER
+            hub.SHORTCUT_ICON_FOLDER = cache_folder
+            try:
+                app = hub.HubApp(
+                    app_id="demo-tool",
+                    name="Demo Tool",
+                    source_folder="Apps/Demo Tool",
+                    icon_path="icon.png",
+                )
+
+                shortcut_icon = hub.resolve_app_shortcut_icon_path(folder, app)
+            finally:
+                hub.SHORTCUT_ICON_FOLDER = original_cache_folder
+
+            self.assertIsNotNone(shortcut_icon)
+            self.assertEqual(".ico", shortcut_icon.suffix.lower())
+            self.assertTrue(shortcut_icon.is_file())
 
     def test_install_app_release_extracts_executable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -269,6 +397,51 @@ class CatalogTests(unittest.TestCase):
             selected = hub.find_installed_executable(install_folder, app)
 
             self.assertEqual(app_exe.resolve(), selected)
+
+    def test_install_app_release_can_select_older_allowed_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir) / "hub"
+            install_root = Path(temp_dir) / "installs"
+            folder.mkdir()
+            (folder / "catalog.json").write_text(
+                json.dumps({"hub_version": "1.0.0", "apps": []}),
+                encoding="utf-8",
+            )
+            package = Path(temp_dir) / "Demo Tool.exe"
+            package.write_bytes(b"fake executable")
+            hub.publish_app_package(
+                folder,
+                mode="Create new app",
+                existing_app_id="",
+                app_name="Demo Tool",
+                app_id="",
+                description="A test app.",
+                version="1.0.0",
+                release_name="Initial",
+                executable_name="",
+                package_input=package,
+                icon_input=None,
+            )
+            package.write_bytes(b"fake executable v2")
+            hub.publish_app_package(
+                folder,
+                mode="Update existing app",
+                existing_app_id="demo-tool",
+                app_name="",
+                app_id="",
+                description="",
+                version="1.1.0",
+                release_name="Newer",
+                executable_name="",
+                package_input=package,
+                icon_input=None,
+            )
+            app = hub.load_catalog(folder).apps[0]
+
+            record = hub.install_app_release(folder, app, version="1.0.0", install_root=install_root)
+
+            self.assertEqual("1.0.0", record.version)
+            self.assertIn("1.0.0", record.install_folder)
 
 
 if __name__ == "__main__":

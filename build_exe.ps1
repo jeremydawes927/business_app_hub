@@ -27,6 +27,7 @@ $pyInstallerArgs = @(
   "--hidden-import", "tkinter.filedialog",
   "--hidden-import", "tkinter.messagebox",
   "--hidden-import", "tkinter.ttk",
+  "--collect-all", "PIL",
   "--name", "Business App Hub",
   "--distpath", $distPath,
   "--workpath", $buildPath

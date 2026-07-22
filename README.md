@@ -13,17 +13,19 @@ The hub is built around a Steam-inspired portal layout:
 - shows app icons, descriptions, allowed releases, and source folders
 - installs approved release ZIPs into a local app-data install folder
 - launches installed apps from the hub or from hub-managed Desktop shortcuts
+- checks managed app shortcuts for updates before launching
+- lets users choose, update, repair, or roll back to any allowed release version
 - lets local users delete installed copies without changing the shared catalog
 - includes a publish page for adding new apps and approved app releases to the shared hub
 - provides a bottom update/download bar with queue status and progress
-- checks the public GitHub releases feed for new Business App Hub versions
+- checks the public GitHub releases feed for new Business App Hub versions and can self-update from release ZIP assets
 - stores only local preferences and installed-app status in `%LOCALAPPDATA%\Business App Hub`
 
 ## Portal Layout
 
 `Find Apps` is the company app store. It reads every app card from the shared `catalog.json`, including the app name, icon, description, default version, allowed releases, and source folder.
 
-Clicking an app opens its detail page. The description editor saves back to the shared company `catalog.json`, so description changes are shared with other employees in the same company folder.
+Clicking an app opens its detail page. The app page shows a read-only company description, a version picker, a run button, and release update cards. Description edits are handled in the admin-only `Publish Apps` page so normal app browsing does not accidentally rewrite shared company metadata.
 
 `My Apps` is the local library. It only shows apps that this computer has installed. Local install records are stored in:
 
@@ -33,9 +35,9 @@ Clicking an app opens its detail page. The description editor saves back to the 
 
 The bottom `UPDATES` bar is the update queue surface. It flashes while work is active, shows queue count, displays progress for the current app, and reveals an **Update Hub** button when the public GitHub release check finds a newer hub version.
 
-The Settings page includes **Create Desktop Shortcut**, which creates a Windows `.lnk` pointing back through the hub. App detail pages can also create app-specific Desktop shortcuts. Those app shortcuts open the app through Business App Hub, so the Desktop stays clean and the hub can keep track of the current local install.
+The Settings page includes **Create Desktop Shortcut**, which creates a Windows `.lnk` pointing back through the hub. App detail pages can also create app-specific Desktop shortcuts. Those app shortcuts open the app through Business App Hub, check the shared catalog for a newer approved release, prompt the user if an update is available, and then launch the local installed copy.
 
-The `Publish Apps` page can create new shared app entries or publish updates to existing app entries. It accepts a `.zip`, `.exe`, or folder, writes the package into the app's `Releases` folder, calculates a SHA-256 hash, updates `catalog.json`, and writes that app's `latest.json`.
+The `Publish Apps` page can create new shared app entries, publish updates to existing app entries, edit only an app description, or change only an app icon. It accepts a `.zip`, `.exe`, or folder, writes the package into the app's `Releases` folder, calculates a SHA-256 hash, updates `catalog.json`, and writes that app's `latest.json`.
 
 Company-specific app metadata belongs in the company OneDrive/SharePoint folder, not in GitHub:
 
@@ -69,7 +71,7 @@ Each app can live inside `Apps/` or point to an existing release folder through 
 
 ## App Icons
 
-Each app can show an icon in the hub library. The simplest setup is to place a PNG in that app's folder:
+Each app can show an icon in the hub library. PNG and ICO files are supported. The simplest setup is to place an icon in that app's folder:
 
 ```text
 Business App Hub/
@@ -80,7 +82,7 @@ Business App Hub/
       Releases/
 ```
 
-If the catalog does not name an icon, the hub automatically looks for common names such as `icon.png`, `app.png`, `logo.png`, or `tile.png` in the app folder, `assets/`, or `icons/`.
+If the catalog does not name an icon, the hub automatically looks for common names such as `icon.png`, `icon.ico`, `app.png`, `app.ico`, `logo.png`, `logo.ico`, or `tile.png` in the app folder, `assets/`, or `icons/`.
 
 You can also set a specific icon in `catalog.json`:
 
@@ -92,7 +94,7 @@ You can also set a specific icon in `catalog.json`:
 }
 ```
 
-PNG is recommended because it works without extra runtime dependencies.
+The **Publish Apps** tab can also change just an existing app's icon without publishing a new release. Choose **Change icon only**, select the app, pick a `.png` or `.ico`, and publish the icon change.
 
 ## Header Image
 
@@ -163,7 +165,7 @@ Build an EXE:
 Build and write a release ZIP/manifest to a release folder:
 
 ```powershell
-.\build_exe.ps1 -Version "0.1.2" -ReleaseRoot "C:\Path\To\Business App Hub"
+.\build_exe.ps1 -Version "0.1.4" -ReleaseRoot "C:\Path\To\Business App Hub"
 ```
 
 ## First-Time Company Setup

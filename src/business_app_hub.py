@@ -6,6 +6,7 @@ import hashlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import urllib.error
 import urllib.parse
@@ -17,27 +18,38 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
+try:
+    from PIL import Image, ImageTk
+except ImportError:  # Pillow is optional; PNG display still works through Tk.
+    Image = None
+    ImageTk = None
+
 
 APP_NAME = "Business App Hub"
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4"
 HUB_FOLDER_NAME = "Business App Hub"
 FONT_FAMILY = "Georgia"
 APP_DATA_FOLDER = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Business App Hub"
 INSTALLS_FOLDER = APP_DATA_FOLDER / "InstalledApps"
+SHORTCUT_ICON_FOLDER = APP_DATA_FOLDER / "ShortcutIcons"
 SETTINGS_FILE = APP_DATA_FOLDER / "settings.json"
 CATALOG_FILE_NAME = "catalog.json"
-HUB_SETTINGS_FILE_NAME = "hub_settings.json"
 APPS_FOLDER_NAME = "Apps"
 BUNDLED_HEADER_IMAGE_NAME = "hub_header.png"
 DEFAULT_GITHUB_RELEASES_API_URL = (
     "https://api.github.com/repos/jeremydawes927/business_app_hub/releases/latest"
 )
-IMAGE_EXTENSIONS = (".png", ".gif", ".ppm", ".pgm")
+IMAGE_EXTENSIONS = (".png", ".ico", ".gif", ".ppm", ".pgm")
+PUBLISH_ICON_EXTENSIONS = (".png", ".ico")
 ICON_CANDIDATE_NAMES = (
     "icon.png",
+    "icon.ico",
     "app.png",
+    "app.ico",
     "logo.png",
+    "logo.ico",
     "tile.png",
+    "tile.ico",
     "icon.gif",
     "app.gif",
     "logo.gif",
@@ -71,6 +83,7 @@ COLORS = {
     "purple": "#6f5bd8",
     "warning": "#f2c94c",
     "success": "#56d19a",
+    "update_green": "#42f59b",
     "text": "#edf2ff",
     "muted": "#9aa7bf",
     "button": "#2f6fa8",
@@ -134,6 +147,12 @@ class InstallRecord:
     version: str
     install_folder: str
     executable_path: str
+
+
+@dataclass(frozen=True)
+class DownloadTask:
+    app: HubApp
+    version: str = ""
 
 
 def normalize_path(path: Path) -> Path:
@@ -202,6 +221,20 @@ def save_github_update_settings(enabled: bool, url: str) -> None:
     save_app_data_settings(settings)
 
 
+def load_coder_settings() -> tuple[bool, bool]:
+    settings = app_data_settings()
+    advanced_open = bool(settings.get("coder_settings_open", False))
+    device_admin = bool(settings.get("device_admin", False))
+    return advanced_open, device_admin
+
+
+def save_coder_settings(advanced_open: bool, device_admin: bool) -> None:
+    settings = app_data_settings()
+    settings["coder_settings_open"] = bool(advanced_open)
+    settings["device_admin"] = bool(device_admin)
+    save_app_data_settings(settings)
+
+
 def normalize_github_releases_url(url: str) -> str:
     raw = (url or DEFAULT_GITHUB_RELEASES_API_URL).strip()
     parsed = urllib.parse.urlparse(raw)
@@ -237,7 +270,33 @@ def release_summary_from_payload(payload: object) -> dict[str, str]:
     name = str(payload.get("name", "")).strip()
     if not tag:
         raise ValueError("GitHub release response did not include tag_name.")
-    return {"tag": tag, "url": html_url, "name": name}
+    asset_url = ""
+    asset_name = ""
+    expected_name = APP_NAME.lower().replace(" ", "")
+    assets = payload.get("assets", [])
+    if isinstance(assets, list):
+        for raw_asset in assets:
+            if not isinstance(raw_asset, dict):
+                continue
+            candidate_name = str(raw_asset.get("name", "")).strip()
+            candidate_url = str(raw_asset.get("browser_download_url", "")).strip()
+            if not candidate_name.lower().endswith(".zip") or not candidate_url:
+                continue
+            if not asset_url:
+                asset_name = candidate_name
+                asset_url = candidate_url
+            normalized_asset = candidate_name.lower().replace(" ", "")
+            if expected_name in normalized_asset:
+                asset_name = candidate_name
+                asset_url = candidate_url
+                break
+    return {
+        "tag": tag,
+        "url": html_url,
+        "name": name,
+        "asset_url": asset_url,
+        "asset_name": asset_name,
+    }
 
 
 def read_github_release_payload(api_url: str) -> object:
@@ -274,6 +333,17 @@ def fetch_latest_github_release(api_url: str) -> dict[str, str]:
         raise
 
 
+def download_url_to_file(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        with destination.open("wb") as output:
+            shutil.copyfileobj(response, output)
+
+
 def load_saved_hub_folder() -> Path | None:
     folder = str(app_data_settings().get("hub_folder", "")).strip()
     if not folder:
@@ -286,36 +356,6 @@ def save_hub_folder(folder: Path) -> None:
     settings = app_data_settings()
     settings["hub_folder"] = str(normalize_path(folder))
     save_app_data_settings(settings)
-
-
-def home_relative_suffix(path: Path) -> str:
-    normalized = normalize_path(path)
-    try:
-        return str(normalized.relative_to(Path.home()))
-    except ValueError:
-        return str(normalized)
-
-
-def load_hub_settings(folder: Path) -> dict[str, object]:
-    settings_path = folder / HUB_SETTINGS_FILE_NAME
-    if not settings_path.is_file():
-        return {}
-    try:
-        raw = json.loads(settings_path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return raw if isinstance(raw, dict) else {}
-
-
-def save_company_hub_folder_preference(folder: Path) -> None:
-    normalized = normalize_path(folder)
-    data = load_hub_settings(normalized)
-    data["preferred_hub_folder_suffix"] = home_relative_suffix(normalized)
-    data["hub_folder_name"] = HUB_FOLDER_NAME
-    (normalized / HUB_SETTINGS_FILE_NAME).write_text(
-        json.dumps(data, indent=2),
-        encoding="utf-8",
-    )
 
 
 def load_installed_app_ids() -> set[str]:
@@ -627,15 +667,56 @@ def is_path_inside(path: Path, parent: Path) -> bool:
         return False
 
 
-def select_release(app: HubApp) -> AppRelease | None:
+def sorted_app_releases(app: HubApp) -> tuple[AppRelease, ...]:
+    return tuple(
+        sorted(
+            app.published_releases,
+            key=lambda release: version_key(release.version),
+            reverse=True,
+        )
+    )
+
+
+def app_release_versions(app: HubApp) -> tuple[str, ...]:
+    return tuple(release.version for release in sorted_app_releases(app))
+
+
+def latest_app_version(app: HubApp) -> str:
+    versions = list(app_release_versions(app))
+    if versions:
+        return max(versions, key=version_key)
+    return app.default_version
+
+
+def app_update_available_for_record(app: HubApp, record: InstallRecord | None) -> bool:
+    if record is None or not Path(record.executable_path).is_file():
+        return False
+    latest = latest_app_version(app)
+    return bool(latest and is_newer_version(latest, record.version))
+
+
+def catalog_app_by_id(catalog: HubCatalog, app_id: str) -> HubApp | None:
+    for app in catalog.apps:
+        if app.app_id == app_id:
+            return app
+    return None
+
+
+def select_release(app: HubApp, version: str = "") -> AppRelease | None:
     releases = app.published_releases
     if not releases:
+        return None
+    requested = version.strip()
+    if requested:
+        for release in releases:
+            if release.version == requested:
+                return release
         return None
     if app.default_version:
         for release in releases:
             if release.version == app.default_version:
                 return release
-    return releases[0]
+    return sorted_app_releases(app)[0]
 
 
 def resolve_release_package_path(
@@ -725,11 +806,13 @@ def is_helper_executable(executable: Path, install_folder: Path) -> bool:
 def install_app_release(
     hub_folder: Path,
     app: HubApp,
+    version: str = "",
     install_root: Path = INSTALLS_FOLDER,
 ) -> InstallRecord:
-    release = select_release(app)
+    release = select_release(app, version)
     if release is None:
-        raise ValueError(f"{app.name} does not have an allowed release to install.")
+        detail = f" version {version}" if version else ""
+        raise ValueError(f"{app.name} does not have an allowed release{detail} to install.")
     package_path = resolve_release_package_path(hub_folder, app, release)
     if package_path is None:
         raise FileNotFoundError(
@@ -790,11 +873,11 @@ def delete_app_install(app: HubApp, install_root: Path = INSTALLS_FOLDER) -> Non
     delete_install_record(app.app_id)
 
 
-def launch_install_record(record: InstallRecord) -> None:
+def launch_install_record(record: InstallRecord) -> subprocess.Popen:
     executable = Path(record.executable_path)
     if not executable.is_file():
         raise FileNotFoundError(f"Installed executable was not found:\n\n{executable}")
-    subprocess.Popen([str(executable)], cwd=str(executable.parent))
+    return subprocess.Popen([str(executable)], cwd=str(executable.parent))
 
 
 def first_executable_in_zip(zip_path: Path) -> str:
@@ -838,6 +921,29 @@ def prepare_release_zip(input_path: Path, destination_zip: Path) -> None:
     raise ValueError("Choose a .zip, .exe, or folder to publish.")
 
 
+def validate_publish_icon(icon_input: Path) -> None:
+    if not icon_input.is_file():
+        raise FileNotFoundError(f"Icon file was not found:\n\n{icon_input}")
+    if icon_input.suffix.lower() not in PUBLISH_ICON_EXTENSIONS:
+        raise ValueError("Choose a .png or .ico file for the app icon.")
+
+
+def copy_app_icon_to_source(
+    hub_folder: Path,
+    app_data: dict[str, object],
+    source_folder: str,
+    icon_input: Path,
+) -> str:
+    validate_publish_icon(icon_input)
+    source = hub_folder / source_folder
+    source.mkdir(parents=True, exist_ok=True)
+    icon_destination = source / icon_input.name
+    if normalize_path(icon_input) != normalize_path(icon_destination):
+        shutil.copy2(icon_input, icon_destination)
+    app_data["icon"] = icon_destination.name
+    return icon_destination.name
+
+
 def find_catalog_app_data(data: dict[str, object], app_id: str) -> dict[str, object] | None:
     apps = data.get("apps", [])
     if not isinstance(apps, list):
@@ -854,6 +960,26 @@ def ensure_catalog_apps_list(data: dict[str, object]) -> list[object]:
         apps = []
         data["apps"] = apps
     return apps
+
+
+def update_app_icon_only(hub_folder: Path, app_id: str, icon_input: Path) -> str:
+    clean_app_id = app_id.strip()
+    if not clean_app_id:
+        raise ValueError("Choose an existing app before changing its icon.")
+    data = load_catalog_json(hub_folder)
+    app_data = find_catalog_app_data(data, clean_app_id)
+    if app_data is None:
+        raise ValueError("Choose an existing app before changing its icon.")
+    clean_name = str(app_data.get("name", clean_app_id)).strip() or clean_app_id
+    source_folder = str(
+        app_data.get("source_folder", f"{APPS_FOLDER_NAME}/{safe_app_folder_name(clean_name)}")
+    ).strip()
+    if not source_folder:
+        source_folder = f"{APPS_FOLDER_NAME}/{safe_app_folder_name(clean_name)}"
+        app_data["source_folder"] = source_folder
+    copy_app_icon_to_source(hub_folder, app_data, source_folder, icon_input)
+    save_catalog_json(hub_folder, data)
+    return clean_app_id
 
 
 def publish_app_package(
@@ -925,11 +1051,8 @@ def publish_app_package(
         if guessed_executable:
             app_data["executable_name"] = guessed_executable
 
-    if icon_input is not None and icon_input.is_file():
-        icon_destination = source / icon_input.name
-        if normalize_path(icon_input) != normalize_path(icon_destination):
-            shutil.copy2(icon_input, icon_destination)
-        app_data["icon"] = icon_destination.name
+    if icon_input is not None:
+        copy_app_icon_to_source(hub_folder, app_data, source_folder, icon_input)
 
     package_rel = f"Releases/{zip_name}"
     zip_hash = hash_file(destination_zip)
@@ -1010,6 +1133,57 @@ def resolve_app_icon_path(hub_folder: Path, app: HubApp) -> Path | None:
             if candidate.is_file() and candidate.suffix.lower() in IMAGE_EXTENSIONS:
                 return normalize_path(candidate)
     return None
+
+
+def load_icon_photo_image(path: Path, max_size: int) -> tk.PhotoImage | None:
+    if Image is not None and ImageTk is not None:
+        try:
+            with Image.open(path) as pil_image:
+                pil_image.load()
+                working = pil_image.convert("RGBA")
+                resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+                working.thumbnail((max_size, max_size), resample)
+                return ImageTk.PhotoImage(working)
+        except Exception:
+            pass
+
+    try:
+        image = tk.PhotoImage(file=str(path))
+    except tk.TclError:
+        return None
+    max_dimension = max(image.width(), image.height())
+    if max_dimension > max_size:
+        scale = max(1, (max_dimension + max_size - 1) // max_size)
+        image = image.subsample(scale, scale)
+    return image
+
+
+def resolve_app_shortcut_icon_path(hub_folder: Path, app: HubApp) -> Path | None:
+    icon_path = resolve_app_icon_path(hub_folder, app)
+    if icon_path is None or not icon_path.exists():
+        return None
+    if icon_path.suffix.lower() == ".ico":
+        return icon_path
+    if Image is None:
+        return None
+
+    try:
+        with Image.open(icon_path) as pil_image:
+            pil_image.load()
+            working = pil_image.convert("RGBA")
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+            working.thumbnail((256, 256), resample)
+            canvas = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+            left = (256 - working.width) // 2
+            top = (256 - working.height) // 2
+            canvas.alpha_composite(working, (left, top))
+
+            SHORTCUT_ICON_FOLDER.mkdir(parents=True, exist_ok=True)
+            cache_path = SHORTCUT_ICON_FOLDER / f"{safe_app_folder_name(app.app_id)}.ico"
+            canvas.save(cache_path, format="ICO", sizes=[(256, 256), (64, 64), (48, 48), (32, 32), (16, 16)])
+            return normalize_path(cache_path)
+    except Exception:
+        return None
 
 
 def resolve_hub_header_texture_path(hub_folder: Path) -> Path | None:
@@ -1114,16 +1288,89 @@ def create_desktop_shortcut_file() -> Path:
     return create_windows_shortcut(desktop_shortcut_path(), target, arguments, working_dir)
 
 
-def create_app_desktop_shortcut_file(app: HubApp, record: InstallRecord) -> Path:
+def create_app_desktop_shortcut_file(
+    app: HubApp,
+    record: InstallRecord,
+    hub_folder: Path | None = None,
+) -> Path:
     target, arguments, working_dir = running_app_shortcut_target(["--launch-app", app.app_id])
     executable = Path(record.executable_path)
-    icon = executable if executable.exists() else None
+    icon = None
+    if hub_folder is not None:
+        icon = resolve_app_shortcut_icon_path(hub_folder, app)
+    if icon is None and executable.exists():
+        icon = executable
     return create_windows_shortcut(
         app_desktop_shortcut_path(app),
         target,
         arguments,
         working_dir,
         icon_path=icon,
+    )
+
+
+def running_hub_install_folder() -> Path:
+    if getattr(sys, "frozen", False):
+        return normalize_path(Path(sys.executable).parent)
+    return normalize_path(Path(__file__).resolve().parent.parent)
+
+
+def write_self_update_script(zip_path: Path, target_folder: Path) -> Path:
+    script_path = APP_DATA_FOLDER / "hub_self_update.ps1"
+    exe_name = Path(sys.executable).name if getattr(sys, "frozen", False) else f"{APP_NAME}.exe"
+    script = "\n".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            f"$pidToWait = {os.getpid()}",
+            f"$zipPath = {powershell_string(zip_path)}",
+            f"$target = {powershell_string(target_folder)}",
+            f"$exeName = {powershell_string(exe_name)}",
+            "$stage = Join-Path ([System.IO.Path]::GetTempPath()) ('BusinessAppHubUpdate_' + [guid]::NewGuid().ToString())",
+            "try { Wait-Process -Id $pidToWait -Timeout 45 -ErrorAction SilentlyContinue } catch { }",
+            "New-Item -ItemType Directory -Force -Path $stage | Out-Null",
+            "Expand-Archive -LiteralPath $zipPath -DestinationPath $stage -Force",
+            "$payload = $stage",
+            "if (-not (Test-Path -LiteralPath (Join-Path $payload $exeName))) {",
+            "    foreach ($child in Get-ChildItem -LiteralPath $stage -Directory) {",
+            "        if (Test-Path -LiteralPath (Join-Path $child.FullName $exeName)) {",
+            "            $payload = $child.FullName",
+            "            break",
+            "        }",
+            "    }",
+            "}",
+            "if (-not (Test-Path -LiteralPath (Join-Path $payload $exeName))) {",
+            "    throw ('Updated hub package did not contain ' + $exeName)",
+            "}",
+            "Get-ChildItem -LiteralPath $payload -Force | Copy-Item -Destination $target -Recurse -Force",
+            "Start-Process -FilePath (Join-Path $target $exeName)",
+            "Start-Sleep -Seconds 2",
+            "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue",
+            "Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue",
+        ]
+    )
+    APP_DATA_FOLDER.mkdir(parents=True, exist_ok=True)
+    script_path.write_text(script, encoding="utf-8")
+    return script_path
+
+
+def start_hub_self_update(zip_path: Path) -> None:
+    if not getattr(sys, "frozen", False):
+        raise RuntimeError("Hub self-update is only available from the packaged EXE.")
+    target_folder = running_hub_install_folder()
+    if not target_folder.exists():
+        raise FileNotFoundError(f"Hub install folder was not found:\n\n{target_folder}")
+    script_path = write_self_update_script(zip_path, target_folder)
+    subprocess.Popen(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script_path),
+        ],
+        cwd=str(target_folder),
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0,
     )
 
 
@@ -1758,14 +2005,9 @@ class BusinessAppHub(tk.Tk):
         path = resolve_app_icon_path(self.hub_folder, app)
         if path is None:
             return None
-        try:
-            image = tk.PhotoImage(file=str(path))
-        except tk.TclError:
+        image = load_icon_photo_image(path, max_size)
+        if image is None:
             return None
-        max_dimension = max(image.width(), image.height())
-        if max_dimension > max_size:
-            scale = max(1, (max_dimension + max_size - 1) // max_size)
-            image = image.subsample(scale, scale)
         self.icon_images[key] = image
         return image
 
@@ -1862,12 +2104,15 @@ class SteamStyleBusinessAppHub(tk.Tk):
         self.current_view = "find"
         self.detail_back_view = "find"
         self.hovered_nav_view: str | None = None
-        self.download_queue: list[HubApp] = []
-        self.active_download: HubApp | None = None
+        self.download_queue: list[DownloadTask] = []
+        self.active_download: DownloadTask | None = None
         self.download_flash_on = False
         self.header_texture_image: tk.PhotoImage | None = None
         self.available_hub_release_url = ""
         self.available_hub_release_version = ""
+        self.available_hub_release_asset_url = ""
+        self.available_hub_release_asset_name = ""
+        self.app_update_flash_on = False
 
         self.path_text = tk.StringVar()
         self.status_text = tk.StringVar(value="Choose the Business App Hub folder.")
@@ -1889,14 +2134,19 @@ class SteamStyleBusinessAppHub(tk.Tk):
         self.publish_package_text = tk.StringVar()
         self.publish_icon_text = tk.StringVar()
         self.publish_status_text = tk.StringVar(value="Choose an app package to publish.")
+        self.detail_version_text = tk.StringVar()
         github_updates_enabled, github_url = load_github_update_settings()
         self.github_updates_enabled = tk.BooleanVar(value=github_updates_enabled)
         self.github_release_url_text = tk.StringVar(value=github_url)
+        coder_settings_open, device_admin = load_coder_settings()
+        self.coder_settings_open = tk.BooleanVar(value=coder_settings_open)
+        self.device_admin = tk.BooleanVar(value=device_admin)
 
         self.apply_theme()
         self.build_ui()
         self.after(100, self.start_folder_discovery)
         self.after(1200, self.check_github_updates_on_startup)
+        self.after(650, self.pulse_app_update_alert)
 
     def apply_theme(self) -> None:
         self.configure(bg=COLORS["background"])
@@ -1925,11 +2175,13 @@ class SteamStyleBusinessAppHub(tk.Tk):
             lightcolor=COLORS["border"],
             darkcolor=COLORS["border"],
             insertcolor=COLORS["text"],
+            padding=3,
+            arrowsize=16,
         )
         style.map(
             "Dark.TCombobox",
             fieldbackground=[
-                ("readonly", COLORS["panel_high"]),
+                ("readonly", COLORS["panel"]),
                 ("disabled", COLORS["panel_alt"]),
                 ("!disabled", COLORS["panel"]),
             ],
@@ -1940,7 +2192,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
             ],
             background=[
                 ("active", COLORS["card_hover"]),
-                ("readonly", COLORS["panel_high"]),
+                ("readonly", COLORS["panel"]),
                 ("!disabled", COLORS["panel"]),
             ],
             selectbackground=[("readonly", COLORS["accent_dark"])],
@@ -1997,6 +2249,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
         self.nav_frame = tk.Frame(chrome, bg=COLORS["background"], padx=20)
         self.nav_frame.grid(row=1, column=0, sticky="ew", pady=(10, 8))
         self.nav_frame.columnconfigure(5, weight=1)
+        self.nav_order = ("my", "find", "publish", "guide", "settings")
+        self.admin_nav_views = {"publish", "guide"}
         self.nav_buttons: dict[str, tk.Label] = {}
         self.build_nav_tab("my", "MY APPS", 0)
         self.build_nav_tab("find", "FIND APPS", 1)
@@ -2248,6 +2502,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
         )
 
     def switch_view(self, view: str) -> None:
+        if view in getattr(self, "admin_nav_views", set()) and not self.device_admin.get():
+            view = "settings"
         self.current_view = view
         if view in ("my", "find", "publish", "guide", "settings"):
             self.detail_back_view = view
@@ -2256,12 +2512,37 @@ class SteamStyleBusinessAppHub(tk.Tk):
 
     def paint_nav(self) -> None:
         active_view = self.detail_back_view if self.current_view == "detail" else self.current_view
+        visible_views = [
+            view
+            for view in self.nav_order
+            if view not in self.admin_nav_views or self.device_admin.get()
+        ]
+        for column in range(9):
+            self.nav_frame.columnconfigure(column, weight=0)
+        spacer_column = len(visible_views)
+        self.nav_frame.columnconfigure(spacer_column, weight=1)
+        for index, view in enumerate(visible_views):
+            self.nav_buttons[view].grid(row=0, column=index, sticky="w", padx=(0, 20), pady=(0, 0))
+        for view in self.nav_order:
+            if view not in visible_views:
+                self.nav_buttons[view].grid_remove()
+        my_updates_available = self.any_app_update_available()
         for view, label in self.nav_buttons.items():
+            if view not in visible_views:
+                continue
             active = view == active_view
             hovered = view == self.hovered_nav_view
+            text = "MY APPS - UPDATE AVAILABLE" if view == "my" and my_updates_available else label.cget("text")
+            if view == "my" and not my_updates_available:
+                text = "MY APPS"
+            if view == "my" and my_updates_available:
+                color = COLORS["update_green"] if self.app_update_flash_on else COLORS["accent"]
+            else:
+                color = COLORS["accent"] if active or hovered else COLORS["nav_text"]
             label.configure(
+                text=text,
                 bg=COLORS["background"],
-                fg=COLORS["accent"] if active or hovered else COLORS["nav_text"],
+                fg=color,
                 font=(FONT_FAMILY, 10, "bold"),
                 highlightthickness=0,
             )
@@ -2270,13 +2551,13 @@ class SteamStyleBusinessAppHub(tk.Tk):
             if search_var is None:
                 self.nav_search_frame.grid_remove()
             else:
-                self.nav_search_frame.grid()
+                self.nav_search_frame.grid(row=0, column=spacer_column + 1, sticky="e")
                 self.nav_search_entry.configure(textvariable=search_var)
 
     def start_folder_discovery(self) -> None:
         saved = load_saved_hub_folder()
         if saved is not None:
-            self.set_hub_folder(saved, remember_company=False)
+            self.set_hub_folder(saved)
             return
 
         found = find_hub_folder()
@@ -2317,15 +2598,10 @@ class SteamStyleBusinessAppHub(tk.Tk):
             return
         self.set_hub_folder(selected)
 
-    def set_hub_folder(self, folder: Path, *, remember_company: bool = True) -> None:
+    def set_hub_folder(self, folder: Path) -> None:
         self.hub_folder = normalize_path(folder)
         self.path_text.set(str(self.hub_folder))
         save_hub_folder(self.hub_folder)
-        if remember_company:
-            try:
-                save_company_hub_folder_preference(self.hub_folder)
-            except OSError:
-                pass
         self.load_header_texture()
         self.paint_header_canvas()
         self.refresh_catalog()
@@ -2355,6 +2631,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
             self.select_app(previous_selection)
 
     def render_current_view(self) -> None:
+        if self.current_view in ("publish", "guide") and not self.device_admin.get():
+            self.current_view = "settings"
         for child in self.content.winfo_children():
             child.destroy()
         self.card_frames.clear()
@@ -2411,6 +2689,23 @@ class SteamStyleBusinessAppHub(tk.Tk):
         if not Path(record.executable_path).is_file():
             return "Install record needs repair"
         return f"Installed {record.version}"
+
+    def latest_catalog_version(self, app: HubApp) -> str:
+        return latest_app_version(app)
+
+    def app_update_available(self, app: HubApp) -> bool:
+        return app_update_available_for_record(app, self.install_record_for(app))
+
+    def any_app_update_available(self) -> bool:
+        return any(self.app_update_available(app) for app in self.catalog.apps)
+
+    def pulse_app_update_alert(self) -> None:
+        self.app_update_flash_on = not self.app_update_flash_on
+        if self.any_app_update_available():
+            self.paint_nav()
+            if self.current_view == "my":
+                self.paint_cards()
+        self.after(650, self.pulse_app_update_alert)
 
     def save_shortcut_download_preference(self) -> None:
         settings = app_data_settings()
@@ -2500,7 +2795,12 @@ class SteamStyleBusinessAppHub(tk.Tk):
         mode_box = ttk.Combobox(
             form,
             textvariable=self.publish_mode_text,
-            values=("Update existing app", "Create new app"),
+            values=(
+                "Update existing app",
+                "Create new app",
+                "Change icon only",
+                "Edit description only",
+            ),
             state="readonly",
             style="Dark.TCombobox",
             width=24,
@@ -2511,7 +2811,10 @@ class SteamStyleBusinessAppHub(tk.Tk):
         app_values = [f"{app.name} [{app.app_id}]" for app in self.catalog.apps]
         if not self.publish_app_id_text.get() and self.catalog.apps:
             self.publish_app_id_text.set(app_values[0])
-        is_create = self.publish_mode_text.get().lower().startswith("create")
+        publish_mode = self.publish_mode_text.get().lower()
+        is_create = publish_mode.startswith("create")
+        is_icon_only = publish_mode.startswith("change icon")
+        is_description_only = publish_mode.startswith("edit description")
         if is_create:
             self.field_label(form, "New app name").grid(row=1, column=0, sticky="w", pady=6)
             ttk.Entry(
@@ -2535,6 +2838,96 @@ class SteamStyleBusinessAppHub(tk.Tk):
                 style="Dark.TCombobox",
             )
             app_box.grid(row=1, column=1, columnspan=3, sticky="ew", pady=6, padx=(10, 0))
+            app_box.bind("<<ComboboxSelected>>", lambda _event: self.render_current_view())
+
+        if is_icon_only:
+            self.field_label(form, "New icon (.png or .ico)").grid(row=2, column=0, sticky="w", pady=6)
+            icon_row = tk.Frame(form, bg=COLORS["panel_alt"])
+            icon_row.grid(row=2, column=1, columnspan=3, sticky="ew", pady=6, padx=(10, 0))
+            icon_row.columnconfigure(0, weight=1)
+            ttk.Entry(
+                icon_row,
+                textvariable=self.publish_icon_text,
+                style="Dark.TEntry",
+            ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+            self.portal_button(
+                icon_row,
+                "Browse",
+                self.browse_publish_icon,
+                compact=True,
+                subtle=True,
+            ).grid(row=0, column=1)
+
+            footer = tk.Frame(form, bg=COLORS["panel_alt"])
+            footer.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(10, 0), pady=(12, 0))
+            footer.columnconfigure(0, weight=1)
+            tk.Label(
+                footer,
+                textvariable=self.publish_status_text,
+                bg=COLORS["panel_alt"],
+                fg=COLORS["muted"],
+                font=(FONT_FAMILY, 9),
+                wraplength=720,
+                justify="left",
+            ).grid(row=0, column=0, sticky="w")
+            self.portal_button(
+                footer,
+                "Change Icon",
+                self.publish_from_form,
+                accent=True,
+            ).grid(row=0, column=1, sticky="e", padx=(18, 0))
+            return
+
+        if is_description_only:
+            tk.Label(
+                form,
+                text="Description",
+                bg=COLORS["panel_alt"],
+                fg=COLORS["text"],
+                font=(FONT_FAMILY, 9, "bold"),
+            ).grid(row=2, column=0, sticky="nw", pady=(12, 6))
+            self.publish_description_editor = tk.Text(
+                form,
+                height=8,
+                wrap="word",
+                bg="#171a27",
+                fg=COLORS["text"],
+                insertbackground=COLORS["text"],
+                relief="flat",
+                font=(FONT_FAMILY, 10),
+                padx=10,
+                pady=8,
+            )
+            self.publish_description_editor.grid(
+                row=2,
+                column=1,
+                columnspan=3,
+                sticky="ew",
+                pady=(12, 6),
+                padx=(10, 0),
+            )
+            selected_app = self.app_rows.get(self.publish_selected_existing_app_id())
+            if selected_app is not None:
+                self.publish_description_editor.insert("1.0", selected_app.description or "")
+            footer = tk.Frame(form, bg=COLORS["panel_alt"])
+            footer.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(10, 0), pady=(12, 0))
+            footer.columnconfigure(0, weight=1)
+            tk.Label(
+                footer,
+                textvariable=self.publish_status_text,
+                bg=COLORS["panel_alt"],
+                fg=COLORS["muted"],
+                font=(FONT_FAMILY, 9),
+                wraplength=720,
+                justify="left",
+            ).grid(row=0, column=0, sticky="w")
+            self.portal_button(
+                footer,
+                "Save Description",
+                self.publish_from_form,
+                accent=True,
+            ).grid(row=0, column=1, sticky="e", padx=(18, 0))
+            return
 
         self.field_label(form, "Version").grid(row=2, column=0, sticky="w", pady=6)
         ttk.Entry(
@@ -2668,20 +3061,23 @@ class SteamStyleBusinessAppHub(tk.Tk):
             "1. Put the company-shared hub folder in OneDrive or SharePoint sync. It "
             "must contain catalog.json and usually contains an Apps folder.\n\n"
             "2. To create a new app, choose Create new app in Publish Apps. Give it a "
-            "name, version, optional icon, description, executable name, and either a "
+            "name, version, optional PNG/ICO icon, description, executable name, and either a "
             ".zip, .exe, or folder. The hub creates Apps/<app>/Releases, copies or "
             "zips the package, writes a SHA-256 hash, and adds the app to catalog.json.\n\n"
             "3. To update an existing app, choose Update existing app, select the app, "
             "enter the new version and update name, then provide the new package. The "
             "hub adds or replaces that release, marks it allowed, and makes it the "
             "default version.\n\n"
-            "4. Employee machines read catalog.json from the shared folder. Downloading "
+            "4. To change only an app icon, choose Change icon only, select the app, "
+            "and pick a .png or .ico file. This copies the icon into the app folder and "
+            "updates catalog.json without changing releases or latest.json.\n\n"
+            "5. Employee machines read catalog.json from the shared folder. Downloading "
             "installs the selected release into the user's local app-data folder, then "
             "the hub launches that local copy. Deleting an app only removes the local "
             "installed copy from that computer.\n\n"
-            "5. Desktop app shortcuts should point back through the hub. That keeps the "
+            "6. Desktop app shortcuts should point back through the hub. That keeps the "
             "Desktop clean and lets the hub decide where the current local executable is.\n\n"
-            "6. Keep company-private release files in the shared hub folder. The public "
+            "7. Keep company-private release files in the shared hub folder. The public "
             "source repository should stay generic."
         )
         text = tk.Text(
@@ -2731,7 +3127,9 @@ class SteamStyleBusinessAppHub(tk.Tk):
         path = filedialog.askopenfilename(
             title="Choose app icon",
             filetypes=(
-                ("Image files", "*.png *.gif"),
+                ("App icon files", "*.png *.ico"),
+                ("PNG files", "*.png"),
+                ("ICO files", "*.ico"),
                 ("All files", "*.*"),
             ),
         )
@@ -2748,6 +3146,51 @@ class SteamStyleBusinessAppHub(tk.Tk):
         if self.hub_folder is None:
             messagebox.showinfo(APP_NAME, "Choose a hub folder before publishing.")
             return
+        mode_text = self.publish_mode_text.get().lower()
+        if mode_text.startswith("edit description"):
+            editor = getattr(self, "publish_description_editor", None)
+            description = editor.get("1.0", "end").strip() if editor is not None else ""
+            app_id = self.publish_selected_existing_app_id()
+            if not app_id:
+                messagebox.showinfo(APP_NAME, "Choose an existing app before editing its description.")
+                return
+            try:
+                update_catalog_app_fields(self.hub_folder, app_id, {"description": description})
+            except Exception as exc:
+                self.publish_status_text.set("Description save failed.")
+                messagebox.showerror(APP_NAME, f"Could not save description:\n\n{exc}")
+                return
+            self.publish_status_text.set(f"Saved description for {app_id}. Catalog refreshed.")
+            self.refresh_catalog()
+            self.selected_app_id = app_id
+            self.detail_back_view = "publish"
+            self.current_view = "detail"
+            self.render_current_view()
+            return
+        icon_text = self.publish_icon_text.get().strip()
+        if mode_text.startswith("change icon"):
+            if not icon_text:
+                messagebox.showinfo(APP_NAME, "Choose a .png or .ico file before changing the app icon.")
+                return
+            try:
+                published_app_id = update_app_icon_only(
+                    self.hub_folder,
+                    self.publish_selected_existing_app_id(),
+                    Path(icon_text),
+                )
+            except Exception as exc:
+                self.publish_status_text.set("Icon update failed.")
+                messagebox.showerror(APP_NAME, f"Could not change app icon:\n\n{exc}")
+                return
+            self.icon_images.clear()
+            self.publish_status_text.set(f"Changed icon for {published_app_id}. Catalog refreshed.")
+            self.refresh_catalog()
+            self.selected_app_id = published_app_id
+            self.detail_back_view = "publish"
+            self.current_view = "detail"
+            self.render_current_view()
+            return
+
         package_text = self.publish_package_text.get().strip()
         if not package_text:
             messagebox.showinfo(APP_NAME, "Choose a .zip, .exe, or folder to publish.")
@@ -2768,9 +3211,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
                 release_name=self.publish_release_name_text.get(),
                 executable_name=self.publish_executable_text.get(),
                 package_input=Path(package_text),
-                icon_input=Path(self.publish_icon_text.get().strip())
-                if self.publish_icon_text.get().strip()
-                else None,
+                icon_input=Path(icon_text) if icon_text else None,
             )
         except Exception as exc:
             self.publish_status_text.set("Publish failed.")
@@ -2846,6 +3287,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
         if not is_newer_version(latest, APP_VERSION):
             self.available_hub_release_url = ""
             self.available_hub_release_version = ""
+            self.available_hub_release_asset_url = ""
+            self.available_hub_release_asset_name = ""
             self.hub_update_button.grid_remove()
             self.download_text.set(f"Hub is up to date. Current version: {APP_VERSION}.")
             if show_no_update:
@@ -2853,6 +3296,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
             return
         self.available_hub_release_version = latest
         self.available_hub_release_url = release.get("url", "") or "https://github.com/"
+        self.available_hub_release_asset_url = release.get("asset_url", "")
+        self.available_hub_release_asset_name = release.get("asset_name", "")
         self.hub_update_button.grid()
         self.download_text.set(f"Hub update available: {APP_VERSION} -> {latest}")
         self.set_downloads_bar_bg(COLORS["download_flash"])
@@ -2861,7 +3306,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
                 APP_NAME,
                 f"A new {APP_NAME} release is available.\n\n"
                 f"Current: {APP_VERSION}\nLatest: {latest}\n\n"
-                "Open the GitHub release page now?",
+                "Update now?",
             ):
                 self.open_available_hub_update()
             settings = app_data_settings()
@@ -2869,10 +3314,69 @@ class SteamStyleBusinessAppHub(tk.Tk):
             save_app_data_settings(settings)
 
     def open_available_hub_update(self) -> None:
-        if self.available_hub_release_url:
-            webbrowser.open(self.available_hub_release_url)
-        else:
+        if not self.available_hub_release_version:
             self.check_github_updates_now()
+            return
+        if not getattr(sys, "frozen", False):
+            if self.available_hub_release_url:
+                webbrowser.open(self.available_hub_release_url)
+            messagebox.showinfo(
+                APP_NAME,
+                "Hub self-update is available from the packaged EXE.\n\n"
+                "Because this copy is running from source, I opened the GitHub release page instead.",
+            )
+            return
+        if not self.available_hub_release_asset_url:
+            messagebox.showinfo(
+                APP_NAME,
+                "GitHub found a newer release, but no release ZIP asset was attached.\n\n"
+                "Open the release page and attach a packaged hub ZIP to enable in-app updating.",
+            )
+            webbrowser.open(self.available_hub_release_url)
+            return
+        if not messagebox.askyesno(
+            APP_NAME,
+            f"Update {APP_NAME} from {APP_VERSION} to {self.available_hub_release_version}?\n\n"
+            "The hub will close, copy the new files into this install folder, and reopen.",
+        ):
+            return
+        self.download_progress.set(12)
+        self.download_text.set(
+            f"Downloading {APP_NAME} {self.available_hub_release_version}..."
+        )
+        self.pulse_downloads_bar()
+
+        def worker() -> None:
+            error: Exception | None = None
+            zip_path = (
+                APP_DATA_FOLDER
+                / "HubUpdates"
+                / (self.available_hub_release_asset_name or f"{APP_NAME} {self.available_hub_release_version}.zip")
+            )
+            try:
+                download_url_to_file(self.available_hub_release_asset_url, zip_path)
+            except Exception as exc:
+                error = exc
+            self.after(0, lambda: self.finish_hub_self_update_download(zip_path, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def finish_hub_self_update_download(self, zip_path: Path, error: Exception | None) -> None:
+        if error is not None:
+            self.download_progress.set(0)
+            self.download_text.set("Hub update download failed.")
+            messagebox.showerror(APP_NAME, f"Could not download hub update:\n\n{error}")
+            return
+        try:
+            self.download_progress.set(86)
+            self.download_text.set("Installing hub update and reopening...")
+            start_hub_self_update(zip_path)
+        except Exception as exc:
+            self.download_progress.set(0)
+            self.download_text.set("Hub update install failed.")
+            messagebox.showerror(APP_NAME, f"Could not start hub self-update:\n\n{exc}")
+            return
+        self.after(250, self.destroy)
 
     def render_settings(self) -> None:
         self.content.columnconfigure(0, weight=1)
@@ -2880,8 +3384,11 @@ class SteamStyleBusinessAppHub(tk.Tk):
         panel = self.portal_panel(self.content)
         panel.grid(row=0, column=0, sticky="nsew")
         panel.columnconfigure(0, weight=1)
+        panel.rowconfigure(0, weight=1)
 
-        page = tk.Frame(panel, bg=COLORS["panel"])
+        _canvas, inner = self.scroll_area(panel, row=0)
+        inner.columnconfigure(0, weight=1)
+        page = tk.Frame(inner, bg=COLORS["panel"])
         page.grid(row=0, column=0, sticky="new", padx=42, pady=28)
         page.columnconfigure(0, weight=1)
 
@@ -2942,8 +3449,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
 
         note = (
             "Once a valid hub folder is confirmed, this computer reuses it on launch. "
-            "The shared company hub also stores a relative folder preference in "
-            f"{HUB_SETTINGS_FILE_NAME}."
+            "Other employees choose or auto-discover their own local sync path."
         )
         tk.Label(
             folder_box,
@@ -3048,6 +3554,72 @@ class SteamStyleBusinessAppHub(tk.Tk):
             accent=True,
         ).grid(row=2, column=3, pady=(12, 0))
 
+        coder_box = tk.Frame(
+            page,
+            bg=COLORS["panel_alt"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            padx=18,
+            pady=16,
+        )
+        coder_box.grid(row=5, column=0, sticky="ew", pady=(18, 0))
+        coder_box.columnconfigure(0, weight=1)
+        tk.Label(
+            coder_box,
+            text="Coder Settings",
+            bg=COLORS["panel_alt"],
+            fg=COLORS["text"],
+            font=(FONT_FAMILY, 12, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            coder_box,
+            text=(
+                "These settings are saved only on this computer. Admin mode unlocks "
+                "Publish Apps and Update Guide for this device."
+            ),
+            bg=COLORS["panel_alt"],
+            fg=COLORS["muted"],
+            font=(FONT_FAMILY, 9),
+            wraplength=900,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        tk.Checkbutton(
+            coder_box,
+            text="Open Advanced Coder Settings",
+            variable=self.coder_settings_open,
+            command=self.toggle_coder_settings,
+            bg=COLORS["panel_alt"],
+            fg=COLORS["text"],
+            selectcolor=COLORS["panel"],
+            activebackground=COLORS["panel_alt"],
+            activeforeground=COLORS["text"],
+            font=(FONT_FAMILY, 9),
+        ).grid(row=2, column=0, sticky="w", pady=(12, 0))
+        if self.coder_settings_open.get():
+            tk.Checkbutton(
+                coder_box,
+                text="Make This Device Admin",
+                variable=self.device_admin,
+                command=self.save_coder_settings_preference,
+                bg=COLORS["panel_alt"],
+                fg=COLORS["text"],
+                selectcolor=COLORS["panel"],
+                activebackground=COLORS["panel_alt"],
+                activeforeground=COLORS["text"],
+                font=(FONT_FAMILY, 9),
+            ).grid(row=3, column=0, sticky="w", pady=(8, 0))
+
+    def toggle_coder_settings(self) -> None:
+        save_coder_settings(self.coder_settings_open.get(), self.device_admin.get())
+        self.render_current_view()
+
+    def save_coder_settings_preference(self) -> None:
+        save_coder_settings(self.coder_settings_open.get(), self.device_admin.get())
+        if not self.device_admin.get() and self.current_view in self.admin_nav_views:
+            self.current_view = "settings"
+        self.paint_nav()
+        self.render_current_view()
+
     def portal_panel(self, parent: tk.Widget) -> tk.Frame:
         return tk.Frame(
             parent,
@@ -3151,9 +3723,11 @@ class SteamStyleBusinessAppHub(tk.Tk):
             grid_holder.columnconfigure(column, weight=0)
         for index, app in enumerate(apps):
             self.create_store_tile(grid_holder, app, index // 5, index % 5)
+        self.paint_cards()
 
     def create_store_tile(self, parent: tk.Widget, app: HubApp, row: int, column: int) -> None:
         installed = self.is_app_installed(app)
+        update_available = self.app_update_available(app)
         tile = tk.Frame(
             parent,
             bg=COLORS["store_card"],
@@ -3165,6 +3739,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         )
         tile.grid(row=row, column=column, sticky="nsew", padx=8, pady=8)
         tile.columnconfigure(0, weight=1)
+        setattr(tile, "_hub_card_base_bg", COLORS["store_card"])
         self.card_frames[app.app_id] = tile
 
         icon = self.load_app_icon(app, 96)
@@ -3199,11 +3774,17 @@ class SteamStyleBusinessAppHub(tk.Tk):
             wraplength=190,
             justify="center",
         ).grid(row=2, column=0, sticky="ew", pady=(7, 0))
+        status = "Update Available" if update_available else "Installed" if installed else "Available"
+        status_color = (
+            COLORS["update_green"]
+            if update_available
+            else COLORS["success"] if installed else COLORS["accent"]
+        )
         tk.Label(
             tile,
-            text="Installed" if installed else "Available",
+            text=status,
             bg=COLORS["store_card"],
-            fg=COLORS["success"] if installed else COLORS["accent"],
+            fg=status_color,
             font=(FONT_FAMILY, 8, "bold"),
         ).grid(row=3, column=0, sticky="ew", pady=(9, 0))
         self.bind_card_click(tile, app.app_id)
@@ -3262,8 +3843,12 @@ class SteamStyleBusinessAppHub(tk.Tk):
         window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
 
         thumb_hovered = False
+        thumb_top = 8
+        thumb_bottom = 44
+        thumb_drag_offset = 18
 
         def draw_thumb(first: float = 0.0, last: float = 1.0) -> None:
+            nonlocal thumb_top, thumb_bottom
             if last - first >= 0.995:
                 scroll_canvas.grid_remove()
                 return
@@ -3285,6 +3870,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
             bottom = min(height - 8, int(last * height))
             if bottom - top < 36:
                 bottom = min(height - 8, top + 36)
+            thumb_top = top
+            thumb_bottom = bottom
             x0 = width // 2 - 4
             x1 = width // 2 + 4
             radius = 4
@@ -3322,10 +3909,26 @@ class SteamStyleBusinessAppHub(tk.Tk):
         def set_scrollbar(first: str, last: str) -> None:
             draw_thumb(float(first), float(last))
 
-        def scroll_to_event(event: tk.Event) -> None:
+        def move_thumb_to(top: float) -> None:
             height = max(scroll_canvas.winfo_height(), 1)
-            fraction = min(1.0, max(0.0, event.y / height))
-            canvas.yview_moveto(fraction)
+            thumb_height = max(thumb_bottom - thumb_top, 36)
+            travel = max(height - 16 - thumb_height, 1)
+            top = min(max(top, 8), 8 + travel)
+            first, last = canvas.yview()
+            visible = max(last - first, 0.0)
+            max_fraction = max(1.0 - visible, 0.0)
+            canvas.yview_moveto(((top - 8) / travel) * max_fraction)
+
+        def on_scroll_press(event: tk.Event) -> None:
+            nonlocal thumb_drag_offset
+            if thumb_top <= event.y <= thumb_bottom:
+                thumb_drag_offset = event.y - thumb_top
+            else:
+                thumb_drag_offset = max(18, (thumb_bottom - thumb_top) // 2)
+                move_thumb_to(event.y - thumb_drag_offset)
+
+        def on_scroll_drag(event: tk.Event) -> None:
+            move_thumb_to(event.y - thumb_drag_offset)
 
         def on_mousewheel(event: tk.Event) -> None:
             delta = int(-1 * (event.delta / 120)) if event.delta else 0
@@ -3347,8 +3950,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
             draw_thumb(first, last)
 
         canvas.configure(yscrollcommand=set_scrollbar)
-        scroll_canvas.bind("<Button-1>", scroll_to_event)
-        scroll_canvas.bind("<B1-Motion>", scroll_to_event)
+        scroll_canvas.bind("<Button-1>", on_scroll_press)
+        scroll_canvas.bind("<B1-Motion>", on_scroll_drag)
         scroll_canvas.bind("<Enter>", lambda _event: set_thumb_hover(True))
         scroll_canvas.bind("<Leave>", lambda _event: set_thumb_hover(False))
         canvas.bind("<MouseWheel>", on_mousewheel)
@@ -3407,6 +4010,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
 
     def create_app_card(self, parent: tk.Widget, app: HubApp, row: int) -> None:
         installed = self.is_app_installed(app)
+        update_available = self.app_update_available(app)
         card = tk.Frame(
             parent,
             bg=COLORS["card"],
@@ -3419,6 +4023,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         card.grid(row=row, column=0, sticky="ew", pady=(0, 10))
         parent.columnconfigure(0, weight=1)
         card.columnconfigure(1, weight=1)
+        setattr(card, "_hub_card_base_bg", COLORS["card"])
         self.card_frames[app.app_id] = card
 
         icon = self.load_app_icon(app, 58)
@@ -3442,8 +4047,12 @@ class SteamStyleBusinessAppHub(tk.Tk):
             fg=COLORS["text"],
             font=(FONT_FAMILY, 13, "bold"),
         ).grid(row=0, column=1, sticky="w")
-        status = self.installed_version_text(app) if installed else "Available"
-        status_color = COLORS["success"] if installed else COLORS["accent"]
+        status = "Update Available" if update_available else self.installed_version_text(app) if installed else "Available"
+        status_color = (
+            COLORS["update_green"]
+            if update_available
+            else COLORS["success"] if installed else COLORS["accent"]
+        )
         tk.Label(
             card,
             text=status,
@@ -3484,6 +4093,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         if app is None:
             return
         self.selected_app_id = app_id
+        self.detail_version_text.set("")
         if self.current_view in ("find", "my"):
             self.detail_back_view = self.current_view
         self.current_view = "detail"
@@ -3493,9 +4103,17 @@ class SteamStyleBusinessAppHub(tk.Tk):
     def paint_cards(self) -> None:
         for app_id, card in self.card_frames.items():
             selected = app_id == self.selected_app_id
-            bg = COLORS["card_selected"] if selected else COLORS["card"]
-            border = COLORS["accent"] if selected else COLORS["border"]
-            card.configure(bg=bg, highlightbackground=border, highlightthickness=2 if selected else 1)
+            app = self.app_rows.get(app_id)
+            update_available = app is not None and self.app_update_available(app)
+            base_bg = str(getattr(card, "_hub_card_base_bg", COLORS["card"]))
+            bg = COLORS["card_selected"] if selected else base_bg
+            if update_available and self.app_update_flash_on:
+                border = COLORS["update_green"]
+                thickness = 2
+            else:
+                border = COLORS["accent"] if selected else COLORS["border"]
+                thickness = 2 if selected else 1
+            card.configure(bg=bg, highlightbackground=border, highlightthickness=thickness)
             self.paint_children(card, bg)
 
     def paint_children(self, widget: tk.Widget, bg: str) -> None:
@@ -3503,6 +4121,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
             if isinstance(child, tk.Label) and child.cget("bg") in (
                 COLORS["card"],
                 COLORS["card_selected"],
+                COLORS["store_card"],
             ):
                 child.configure(bg=bg)
             if isinstance(child, tk.Frame):
@@ -3582,6 +4201,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
             fg=COLORS["muted"],
             font=(FONT_FAMILY, 10),
         ).grid(row=1, column=1, sticky="w", pady=(6, 0))
+        versions = app_release_versions(app)
+        selected_version = self.selected_detail_version(app)
         action_stack = tk.Frame(hero, bg=COLORS["panel_alt"])
         action_stack.grid(row=2, column=1, sticky="w", pady=(18, 0))
         self.portal_button(
@@ -3589,13 +4210,31 @@ class SteamStyleBusinessAppHub(tk.Tk):
             "Run App",
             self.launch_selected_app,
             state="normal" if installed else "disabled",
-        ).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        tk.Label(
+            action_stack,
+            text="Version",
+            bg=COLORS["panel_alt"],
+            fg=COLORS["muted"],
+            font=(FONT_FAMILY, 9, "bold"),
+        ).grid(row=0, column=1, sticky="w", padx=(0, 8))
+        version_box = ttk.Combobox(
+            action_stack,
+            textvariable=self.detail_version_text,
+            values=versions,
+            state="readonly" if versions else "disabled",
+            style="Dark.TCombobox",
+            width=15,
+        )
+        version_box.grid(row=0, column=2, sticky="w", padx=(0, 12))
+        version_box.bind("<<ComboboxSelected>>", lambda _event: self.render_current_view())
         self.portal_button(
             action_stack,
-            "Update / Repair" if installed else "Download",
-            lambda selected=app: self.queue_download(selected),
+            self.detail_action_text(app, selected_version),
+            lambda selected=app: self.queue_download(selected, self.selected_detail_version(selected)),
             accent=True,
-        ).grid(row=0, column=1, sticky="w", padx=(0, 10))
+            state="normal" if versions else "disabled",
+        ).grid(row=0, column=3, sticky="w", padx=(0, 12))
         tk.Checkbutton(
             action_stack,
             text="Create Desktop shortcut after download",
@@ -3607,7 +4246,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
             activebackground=COLORS["panel_alt"],
             activeforeground=COLORS["text"],
             font=(FONT_FAMILY, 9),
-        ).grid(row=0, column=2, sticky="w")
+        ).grid(row=0, column=4, sticky="w")
 
         description_panel = tk.Frame(
             page,
@@ -3626,68 +4265,35 @@ class SteamStyleBusinessAppHub(tk.Tk):
             fg=COLORS["text"],
             font=(FONT_FAMILY, 12, "bold"),
         ).grid(row=0, column=0, sticky="w")
-        self.description_editor = tk.Text(
+        tk.Label(
             description_panel,
-            height=6,
-            width=105,
-            wrap="word",
+            text=app.description or "No company description has been added yet.",
             bg="#171a27",
             fg=COLORS["text"],
-            insertbackground=COLORS["text"],
-            relief="flat",
             font=(FONT_FAMILY, 10),
-            padx=10,
-            pady=8,
-        )
-        self.description_editor.grid(row=1, column=0, sticky="ew", pady=(8, 8))
-        self.description_editor.insert("1.0", app.description or "")
-        self.portal_button(
-            description_panel,
-            "Save Shared Description",
-            self.save_selected_description,
-            compact=True,
-        ).grid(row=2, column=0, sticky="e")
-
-        detail_grid = tk.Frame(page, bg=COLORS["panel"])
-        detail_grid.grid(row=3, column=0, sticky="ew")
-        for col in range(3):
-            detail_grid.columnconfigure(col, weight=1)
-        self.info_tile(detail_grid, "Executable", app.executable_name or "-", 0)
-        self.info_tile(detail_grid, "Source Folder", app.source_folder or "-", 1)
-        self.info_tile(detail_grid, "Releases", self.release_status(app), 2)
+            wraplength=1120,
+            justify="left",
+            anchor="nw",
+            padx=12,
+            pady=10,
+        ).grid(row=1, column=0, sticky="ew", pady=(8, 0))
 
         releases_panel = tk.Frame(page, bg=COLORS["panel"])
-        releases_panel.grid(row=4, column=0, sticky="ew", pady=(16, 0))
+        releases_panel.grid(row=3, column=0, sticky="ew", pady=(16, 0))
         releases_panel.columnconfigure(0, weight=1)
         releases_panel.rowconfigure(1, weight=1)
         tk.Label(
             releases_panel,
-            text="APPROVED RELEASES",
+            text="VERSION UPDATES",
             bg=COLORS["panel"],
             fg=COLORS["text"],
             font=(FONT_FAMILY, 12, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 6))
-        release_list = tk.Listbox(
-            releases_panel,
-            bg=COLORS["panel_alt"],
-            fg=COLORS["text"],
-            relief="flat",
-            activestyle="none",
-            font=(FONT_FAMILY, 10),
-            width=115,
-            height=6,
-        )
-        release_list.grid(row=1, column=0, sticky="ew")
-        releases = app.published_releases
-        if not releases:
-            release_list.insert("end", "No allowed releases yet.")
-        else:
-            for release in releases:
-                release_list.insert("end", f"{release.version}    {release.notes or 'No notes'}")
+        self.render_release_update_cards(releases_panel, app)
 
         action_row = tk.Frame(page, bg=COLORS["panel"])
-        action_row.grid(row=5, column=0, sticky="ew", pady=(14, 0))
-        for col in range(5):
+        action_row.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        for col in range(3):
             action_row.columnconfigure(col, weight=1)
         self.portal_button(
             action_row,
@@ -3695,209 +4301,12 @@ class SteamStyleBusinessAppHub(tk.Tk):
             self.open_selected_source_folder,
             subtle=True,
         ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.portal_button(
-            action_row,
-            "Launch",
-            self.launch_selected_app,
-            state="normal" if installed else "disabled",
-        ).grid(row=0, column=1, sticky="ew", padx=6)
         self.portal_button(
             action_row,
             "Create Shortcut",
             self.create_selected_app_shortcut,
             state="normal" if installed else "disabled",
             subtle=True,
-        ).grid(row=0, column=2, sticky="ew", padx=6)
-        self.portal_button(
-            action_row,
-            "Delete Local Install",
-            self.delete_selected_app,
-            state="normal" if installed else "disabled",
-            subtle=True,
-        ).grid(row=0, column=3, sticky="ew", padx=6)
-        self.portal_button(
-            action_row,
-            "Download / Update",
-            lambda selected=app: self.queue_download(selected),
-            accent=True,
-        ).grid(row=0, column=4, sticky="ew", padx=(6, 0))
-
-    def show_app_detail(self, app: HubApp | None) -> None:
-        for child in self.detail_panel.winfo_children():
-            child.destroy()
-        self.detail_panel.columnconfigure(0, weight=1)
-        self.detail_panel.rowconfigure(4, weight=1)
-
-        if app is None:
-            detail = "Choose an app to view downloads, releases, and company notes."
-            if self.current_view == "my":
-                detail = "Your downloaded apps appear here after you install one."
-            tk.Label(
-                self.detail_panel,
-                text="Select an app",
-                bg=COLORS["panel"],
-                fg=COLORS["text"],
-                font=(FONT_FAMILY, 22, "bold"),
-            ).grid(row=0, column=0, sticky="w")
-            tk.Label(
-                self.detail_panel,
-                text=detail,
-                bg=COLORS["panel"],
-                fg=COLORS["muted"],
-                font=(FONT_FAMILY, 11),
-                wraplength=560,
-                justify="left",
-            ).grid(row=1, column=0, sticky="w", pady=(10, 0))
-            return
-
-        installed = self.is_app_installed(app)
-        hero = tk.Frame(self.detail_panel, bg=COLORS["panel"])
-        hero.grid(row=0, column=0, sticky="ew")
-        hero.columnconfigure(1, weight=1)
-        icon = self.load_app_icon(app, 112)
-        if icon:
-            icon_label = tk.Label(hero, image=icon, bg=COLORS["panel"], width=124, height=124)
-        else:
-            icon_label = tk.Label(
-                hero,
-                text=self.app_initials(app.name),
-                bg=COLORS["purple"],
-                fg="#ffffff",
-                width=8,
-                height=4,
-                font=(FONT_FAMILY, 20, "bold"),
-            )
-        icon_label.grid(row=0, column=0, rowspan=3, sticky="nw", padx=(0, 18))
-        tk.Label(
-            hero,
-            text=app.name,
-            bg=COLORS["panel"],
-            fg=COLORS["text"],
-            font=(FONT_FAMILY, 24, "bold"),
-        ).grid(row=0, column=1, sticky="w")
-        tk.Label(
-            hero,
-            text=(
-                f"{app.app_id}  |  Default {app.default_version or '-'}  |  "
-                f"{self.installed_version_text(app)}"
-            ),
-            bg=COLORS["panel"],
-            fg=COLORS["muted"],
-            font=(FONT_FAMILY, 10),
-        ).grid(row=1, column=1, sticky="w", pady=(5, 0))
-        self.portal_button(
-            hero,
-            "Run App" if installed else "Download",
-            self.launch_selected_app if installed else lambda selected=app: self.queue_download(selected),
-            accent=True,
-        ).grid(row=2, column=1, sticky="w", pady=(16, 0))
-        if installed:
-            self.portal_button(
-                hero,
-                "Update / Repair",
-                lambda selected=app: self.queue_download(selected),
-                compact=True,
-                subtle=True,
-            ).grid(row=2, column=1, sticky="w", padx=(110, 0), pady=(16, 0))
-        else:
-            tk.Checkbutton(
-                hero,
-                text="Create Desktop shortcut after download",
-                variable=self.create_shortcut_on_download,
-                command=self.save_shortcut_download_preference,
-                bg=COLORS["panel"],
-                fg=COLORS["muted"],
-                selectcolor=COLORS["panel"],
-                activebackground=COLORS["panel"],
-                activeforeground=COLORS["text"],
-                font=(FONT_FAMILY, 9),
-            ).grid(row=2, column=1, sticky="w", padx=(110, 0), pady=(16, 0))
-
-        notes = tk.Frame(
-            self.detail_panel,
-            bg=COLORS["panel_alt"],
-            highlightbackground=COLORS["border"],
-            highlightthickness=1,
-            padx=12,
-            pady=10,
-        )
-        notes.grid(row=1, column=0, sticky="ew", pady=(18, 14))
-        notes.columnconfigure(0, weight=1)
-        tk.Label(
-            notes,
-            text="Company Description",
-            bg=COLORS["panel_alt"],
-            fg=COLORS["text"],
-            font=(FONT_FAMILY, 11, "bold"),
-        ).grid(row=0, column=0, sticky="w")
-        self.description_editor = tk.Text(
-            notes,
-            height=7,
-            wrap="word",
-            bg="#1b1e2b",
-            fg=COLORS["text"],
-            insertbackground=COLORS["text"],
-            relief="flat",
-            font=(FONT_FAMILY, 10),
-            padx=10,
-            pady=8,
-        )
-        self.description_editor.grid(row=1, column=0, sticky="ew", pady=(8, 8))
-        self.description_editor.insert("1.0", app.description or "")
-        self.portal_button(
-            notes,
-            "Save Shared Description",
-            self.save_selected_description,
-            compact=True,
-        ).grid(row=2, column=0, sticky="e")
-
-        detail_grid = tk.Frame(self.detail_panel, bg=COLORS["panel"])
-        detail_grid.grid(row=2, column=0, sticky="ew")
-        for col in range(3):
-            detail_grid.columnconfigure(col, weight=1)
-        self.info_tile(detail_grid, "Executable", app.executable_name or "-", 0)
-        self.info_tile(detail_grid, "Source Folder", app.source_folder or "-", 1)
-        self.info_tile(detail_grid, "Releases", self.release_status(app), 2)
-
-        tk.Label(
-            self.detail_panel,
-            text="APPROVED RELEASES",
-            bg=COLORS["panel"],
-            fg=COLORS["text"],
-            font=(FONT_FAMILY, 12, "bold"),
-        ).grid(row=3, column=0, sticky="w", pady=(18, 6))
-        release_list = tk.Listbox(
-            self.detail_panel,
-            bg=COLORS["panel_alt"],
-            fg=COLORS["text"],
-            relief="flat",
-            activestyle="none",
-            font=(FONT_FAMILY, 10),
-            height=8,
-        )
-        release_list.grid(row=4, column=0, sticky="nsew")
-        releases = app.published_releases
-        if not releases:
-            release_list.insert("end", "No allowed releases yet.")
-        else:
-            for release in releases:
-                release_list.insert("end", f"{release.version}    {release.notes or 'No notes'}")
-
-        action_row = tk.Frame(self.detail_panel, bg=COLORS["panel"])
-        action_row.grid(row=5, column=0, sticky="ew", pady=(14, 0))
-        for col in range(4):
-            action_row.columnconfigure(col, weight=1)
-        self.portal_button(
-            action_row,
-            "Open Source Folder",
-            self.open_selected_source_folder,
-            subtle=True,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.portal_button(
-            action_row,
-            "Launch",
-            self.launch_selected_app,
-            state="normal" if installed else "disabled",
         ).grid(row=0, column=1, sticky="ew", padx=6)
         self.portal_button(
             action_row,
@@ -3905,55 +4314,106 @@ class SteamStyleBusinessAppHub(tk.Tk):
             self.delete_selected_app,
             state="normal" if installed else "disabled",
             subtle=True,
-        ).grid(row=0, column=2, sticky="ew", padx=6)
-        self.portal_button(
-            action_row,
-            "Download / Update",
-            lambda selected=app: self.queue_download(selected),
-            accent=True,
-        ).grid(row=0, column=3, sticky="ew", padx=(6, 0))
+        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
-    def info_tile(self, parent: tk.Widget, label: str, value: str, column: int) -> None:
-        tile = tk.Frame(parent, bg=COLORS["panel_alt"], padx=10, pady=8)
-        tile.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 6, 0))
-        tk.Label(
-            tile,
-            text=label,
-            bg=COLORS["panel_alt"],
-            fg=COLORS["muted"],
-            font=(FONT_FAMILY, 8, "bold"),
-        ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            tile,
-            text=value,
-            bg=COLORS["panel_alt"],
-            fg=COLORS["text"],
-            font=(FONT_FAMILY, 9),
-            wraplength=190,
-            justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
-
-    def save_selected_description(self) -> None:
-        app = self.selected_app()
-        if app is None or self.hub_folder is None:
+    def render_release_update_cards(self, parent: tk.Widget, app: HubApp) -> None:
+        releases = sorted_app_releases(app)
+        if not releases:
+            empty = tk.Frame(
+                parent,
+                bg=COLORS["panel_alt"],
+                highlightbackground=COLORS["border"],
+                highlightthickness=1,
+                padx=18,
+                pady=14,
+            )
+            empty.grid(row=1, column=0, sticky="ew")
+            tk.Label(
+                empty,
+                text="No approved releases yet.",
+                bg=COLORS["panel_alt"],
+                fg=COLORS["muted"],
+                font=(FONT_FAMILY, 10),
+            ).grid(row=0, column=0, sticky="w")
             return
-        description = self.description_editor.get("1.0", "end").strip()
-        try:
-            update_catalog_app_fields(self.hub_folder, app.app_id, {"description": description})
-        except Exception as exc:
-            messagebox.showerror(APP_NAME, f"Could not save description:\n\n{exc}")
-            return
-        self.status_text.set(f"Saved description for {app.name}.")
-        self.refresh_catalog()
+        installed_record = self.install_record_for(app)
+        for row, release in enumerate(releases, start=1):
+            card = tk.Frame(
+                parent,
+                bg=COLORS["panel_alt"],
+                highlightbackground=COLORS["border"],
+                highlightthickness=1,
+                padx=16,
+                pady=13,
+            )
+            card.grid(row=row, column=0, sticky="ew", pady=(0, 10))
+            card.columnconfigure(1, weight=1)
+            badge_bg = COLORS["accent"] if release.version == app.default_version else COLORS["panel_high"]
+            tk.Label(
+                card,
+                text=release.version,
+                bg=badge_bg,
+                fg=COLORS["background"] if release.version == app.default_version else COLORS["text"],
+                font=(FONT_FAMILY, 10, "bold"),
+                padx=12,
+                pady=7,
+            ).grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 14))
+            title_bits = [release.notes or f"Release {release.version}"]
+            if release.version == app.default_version:
+                title_bits.append("Default")
+            if installed_record is not None and installed_record.version == release.version:
+                title_bits.append("Installed")
+            tk.Label(
+                card,
+                text="  |  ".join(title_bits),
+                bg=COLORS["panel_alt"],
+                fg=COLORS["text"],
+                font=(FONT_FAMILY, 11, "bold"),
+                anchor="w",
+            ).grid(row=0, column=1, sticky="ew")
+            detail = release.notes or "No update notes were added for this release."
+            tk.Label(
+                card,
+                text=detail,
+                bg=COLORS["panel_alt"],
+                fg=COLORS["muted"],
+                font=(FONT_FAMILY, 9),
+                wraplength=1120,
+                justify="left",
+                anchor="w",
+            ).grid(row=1, column=1, sticky="ew", pady=(6, 0))
 
-    def queue_download(self, app: HubApp) -> None:
-        queued_ids = {queued.app_id for queued in self.download_queue}
+    def default_detail_version(self, app: HubApp) -> str:
+        return latest_app_version(app) or app.default_version
+
+    def selected_detail_version(self, app: HubApp) -> str:
+        versions = app_release_versions(app)
+        selected = self.detail_version_text.get().strip()
+        if selected in versions:
+            return selected
+        fallback = self.default_detail_version(app)
+        if fallback:
+            self.detail_version_text.set(fallback)
+        return fallback
+
+    def detail_action_text(self, app: HubApp, selected_version: str) -> str:
+        record = self.install_record_for(app)
+        if record is None or not Path(record.executable_path).is_file():
+            return "Download"
+        if selected_version and record.version != selected_version:
+            return "Change Version"
+        return "Update / Repair"
+
+    def queue_download(self, app: HubApp, version: str = "") -> None:
+        selected_version = version.strip() or self.default_detail_version(app)
+        queued_ids = {(queued.app.app_id, queued.version) for queued in self.download_queue}
         if self.active_download is not None:
-            queued_ids.add(self.active_download.app_id)
-        if app.app_id in queued_ids:
-            self.download_text.set(f"{app.name} is already in the update queue.")
+            queued_ids.add((self.active_download.app.app_id, self.active_download.version))
+        task_key = (app.app_id, selected_version)
+        if task_key in queued_ids:
+            self.download_text.set(f"{app.name} {selected_version or ''} is already in the update queue.")
             return
-        self.download_queue.append(app)
+        self.download_queue.append(DownloadTask(app=app, version=selected_version))
         self.update_download_status()
         if self.active_download is None:
             self.start_next_download()
@@ -3975,7 +4435,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
             return
         progress = min(self.download_progress.get() + 4, 100)
         self.download_progress.set(progress)
-        self.download_text.set(f"Downloading {self.active_download.name}... {progress}%")
+        version = f" {self.active_download.version}" if self.active_download.version else ""
+        self.download_text.set(f"Downloading {self.active_download.app.name}{version}... {progress}%")
         if progress >= 100:
             self.finish_active_download()
             return
@@ -3992,13 +4453,13 @@ class SteamStyleBusinessAppHub(tk.Tk):
             self.after(900, self.start_next_download)
             return
         try:
-            record = install_app_release(self.hub_folder, finished)
+            record = install_app_release(self.hub_folder, finished.app, finished.version)
             save_install_record(record)
             if self.create_shortcut_on_download.get():
-                create_app_desktop_shortcut_file(finished, record)
+                create_app_desktop_shortcut_file(finished.app, record, self.hub_folder)
         except Exception as exc:
-            self.download_text.set(f"{finished.name} install failed.")
-            messagebox.showerror(APP_NAME, f"Could not install {finished.name}:\n\n{exc}")
+            self.download_text.set(f"{finished.app.name} install failed.")
+            messagebox.showerror(APP_NAME, f"Could not install {finished.app.name}:\n\n{exc}")
             self.active_download = None
             self.reload_install_state()
             self.update_download_status()
@@ -4006,7 +4467,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
             self.after(900, self.start_next_download)
             return
         self.reload_install_state()
-        self.download_text.set(f"{finished.name} is installed and ready in My Apps.")
+        self.download_text.set(f"{finished.app.name} {record.version} is installed and ready in My Apps.")
         self.active_download = None
         self.update_download_status()
         self.render_current_view()
@@ -4049,14 +4510,9 @@ class SteamStyleBusinessAppHub(tk.Tk):
         path = resolve_app_icon_path(self.hub_folder, app)
         if path is None:
             return None
-        try:
-            image = tk.PhotoImage(file=str(path))
-        except tk.TclError:
+        image = load_icon_photo_image(path, max_size)
+        if image is None:
             return None
-        max_dimension = max(image.width(), image.height())
-        if max_dimension > max_size:
-            scale = max(1, (max_dimension + max_size - 1) // max_size)
-            image = image.subsample(scale, scale)
         self.icon_images[key] = image
         return image
 
@@ -4127,7 +4583,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
             messagebox.showinfo(APP_NAME, f"Download {app.name} before creating a shortcut.")
             return
         try:
-            shortcut_path = create_app_desktop_shortcut_file(app, record)
+            shortcut_path = create_app_desktop_shortcut_file(app, record, self.hub_folder)
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Could not create app shortcut:\n\n{exc}")
             return
@@ -4171,23 +4627,100 @@ class SteamStyleBusinessAppHub(tk.Tk):
 
 
 def launch_app_from_cli(app_id: str) -> None:
+    root = tk.Tk()
+    root.withdraw()
     record = load_install_records().get(app_id)
     if record is None:
-        root = tk.Tk()
-        root.withdraw()
         messagebox.showerror(
             APP_NAME,
             f"That app is not installed through {APP_NAME} on this computer:\n\n{app_id}",
         )
         root.destroy()
         return
+    app: HubApp | None = None
+    hub_folder = load_saved_hub_folder()
+    if hub_folder is not None:
+        try:
+            app = catalog_app_by_id(load_catalog(hub_folder), app_id)
+        except Exception:
+            app = None
+    if app is not None and app_update_available_for_record(app, record):
+        latest = latest_app_version(app)
+        if messagebox.askyesno(
+            APP_NAME,
+            f"{app.name} has an update available.\n\n"
+            f"Installed: {record.version}\nLatest: {latest}\n\n"
+            "Update before launching?",
+        ):
+            popup = show_status_popup(
+                root,
+                "Updating",
+                f"Updating {app.name} to {latest}...",
+            )
+            root.update()
+            try:
+                record = install_app_release(hub_folder, app, latest)
+                save_install_record(record)
+                create_app_desktop_shortcut_file(app, record, hub_folder)
+            except Exception as exc:
+                popup.destroy()
+                if not messagebox.askyesno(
+                    APP_NAME,
+                    f"Could not update {app.name}:\n\n{exc}\n\nLaunch the installed version anyway?",
+                ):
+                    root.destroy()
+                    return
+            else:
+                popup.destroy()
+    popup: tk.Toplevel | None = None
     try:
+        name = app.name if app is not None else app_id
+        popup = show_status_popup(root, "App Loading", f"Opening {name}...")
+        root.update()
         launch_install_record(record)
     except Exception as exc:
-        root = tk.Tk()
-        root.withdraw()
+        if popup is not None:
+            popup.destroy()
         messagebox.showerror(APP_NAME, f"Could not launch app:\n\n{exc}")
         root.destroy()
+        return
+    root.after(1400, root.destroy)
+    root.mainloop()
+
+
+def show_status_popup(root: tk.Tk, title: str, message: str) -> tk.Toplevel:
+    popup = tk.Toplevel(root)
+    popup.title(title)
+    popup.configure(bg=COLORS["panel"])
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+    popup.columnconfigure(0, weight=1)
+    tk.Label(
+        popup,
+        text=message,
+        bg=COLORS["panel"],
+        fg=COLORS["text"],
+        font=(FONT_FAMILY, 11, "bold"),
+        padx=26,
+        pady=18,
+        wraplength=420,
+        justify="center",
+    ).grid(row=0, column=0, sticky="ew")
+    progress = ttk.Progressbar(
+        popup,
+        mode="indeterminate",
+        style="Download.Horizontal.TProgressbar",
+        length=320,
+    )
+    progress.grid(row=1, column=0, sticky="ew", padx=26, pady=(0, 22))
+    progress.start(12)
+    popup.update_idletasks()
+    width = popup.winfo_width()
+    height = popup.winfo_height()
+    screen_width = popup.winfo_screenwidth()
+    screen_height = popup.winfo_screenheight()
+    popup.geometry(f"+{(screen_width - width) // 2}+{(screen_height - height) // 2}")
+    return popup
 
 
 def main() -> None:
