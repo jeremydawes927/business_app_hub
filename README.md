@@ -39,6 +39,8 @@ The Settings page includes **Create Desktop Shortcut**, which creates a Windows 
 
 The `Publish Apps` page can create new shared app entries, publish updates to existing app entries, edit only an app description, or change only an app icon. It accepts a `.zip`, `.exe`, or folder, writes the package into the app's `Releases` folder, calculates a SHA-256 hash, updates `catalog.json`, and writes that app's `latest.json`.
 
+When publishing a release, admins can also enter version update notes and attach an optional update image. Those values are stored in the shared company `catalog.json` and render as read-only update cards on the app page. The app's general description stays separate from release notes and is edited through the description-only publish mode.
+
 Company-specific app metadata belongs in the company OneDrive/SharePoint folder, not in GitHub:
 
 - `catalog.json`
@@ -128,7 +130,11 @@ The fallback search also checks `hub_header.png`, `portal_header.png`, `backgrou
           "version": "1.0.0",
           "zip": "Releases/Inventory Helper 1.0.0.zip",
           "sha256": "PUT_REAL_SHA256_HERE",
-          "notes": "First approved release"
+          "notes": "First approved release",
+          "update_name": "First approved release",
+          "update_description": "Added the first company-approved installer package.",
+          "update_image": "UpdateImages/1.0.0.png",
+          "date": "2026-07-22"
         }
       ]
     }
@@ -165,7 +171,7 @@ Build an EXE:
 Build and write a release ZIP/manifest to a release folder:
 
 ```powershell
-.\build_exe.ps1 -Version "0.1.4" -ReleaseRoot "C:\Path\To\Business App Hub"
+.\build_exe.ps1 -Version "0.1.5" -ReleaseRoot "C:\Path\To\Business App Hub"
 ```
 
 ## First-Time Company Setup

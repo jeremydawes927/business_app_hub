@@ -14,6 +14,7 @@ import urllib.request
 import webbrowser
 import zipfile
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
@@ -26,7 +27,7 @@ except ImportError:  # Pillow is optional; PNG display still works through Tk.
 
 
 APP_NAME = "Business App Hub"
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.1.5"
 HUB_FOLDER_NAME = "Business App Hub"
 FONT_FAMILY = "Georgia"
 APP_DATA_FOLDER = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Business App Hub"
@@ -39,8 +40,9 @@ BUNDLED_HEADER_IMAGE_NAME = "hub_header.png"
 DEFAULT_GITHUB_RELEASES_API_URL = (
     "https://api.github.com/repos/jeremydawes927/business_app_hub/releases/latest"
 )
-IMAGE_EXTENSIONS = (".png", ".ico", ".gif", ".ppm", ".pgm")
+IMAGE_EXTENSIONS = (".png", ".ico", ".gif", ".jpg", ".jpeg", ".ppm", ".pgm")
 PUBLISH_ICON_EXTENSIONS = (".png", ".ico")
+PUBLISH_UPDATE_IMAGE_EXTENSIONS = (".png", ".ico", ".jpg", ".jpeg", ".gif")
 ICON_CANDIDATE_NAMES = (
     "icon.png",
     "icon.ico",
@@ -103,6 +105,10 @@ class AppRelease:
     package: str = ""
     sha256: str = ""
     notes: str = ""
+    update_name: str = ""
+    update_description: str = ""
+    update_image: str = ""
+    date: str = ""
     allowed: bool = True
 
 
@@ -504,6 +510,10 @@ def parse_release(raw: object) -> AppRelease | None:
         package=package,
         sha256=str(raw.get("sha256", "")).strip(),
         notes=str(raw.get("notes", "")).strip(),
+        update_name=str(raw.get("update_name", "")).strip(),
+        update_description=str(raw.get("update_description", "")).strip(),
+        update_image=str(raw.get("update_image", raw.get("image", ""))).strip(),
+        date=str(raw.get("date", "")).strip(),
         allowed=bool(raw.get("allowed", True)),
     )
 
@@ -928,6 +938,13 @@ def validate_publish_icon(icon_input: Path) -> None:
         raise ValueError("Choose a .png or .ico file for the app icon.")
 
 
+def validate_publish_update_image(image_input: Path) -> None:
+    if not image_input.is_file():
+        raise FileNotFoundError(f"Update image file was not found:\n\n{image_input}")
+    if image_input.suffix.lower() not in PUBLISH_UPDATE_IMAGE_EXTENSIONS:
+        raise ValueError("Choose a .png, .jpg, .jpeg, .gif, or .ico file for the update image.")
+
+
 def copy_app_icon_to_source(
     hub_folder: Path,
     app_data: dict[str, object],
@@ -942,6 +959,23 @@ def copy_app_icon_to_source(
         shutil.copy2(icon_input, icon_destination)
     app_data["icon"] = icon_destination.name
     return icon_destination.name
+
+
+def copy_release_image_to_source(
+    hub_folder: Path,
+    source_folder: str,
+    version: str,
+    image_input: Path,
+) -> str:
+    validate_publish_update_image(image_input)
+    source = hub_folder / source_folder
+    updates_folder = source / "UpdateImages"
+    updates_folder.mkdir(parents=True, exist_ok=True)
+    image_name = f"{safe_version_folder_name(version)}{image_input.suffix.lower()}"
+    destination = updates_folder / image_name
+    if normalize_path(image_input) != normalize_path(destination):
+        shutil.copy2(image_input, destination)
+    return f"UpdateImages/{image_name}"
 
 
 def find_catalog_app_data(data: dict[str, object], app_id: str) -> dict[str, object] | None:
@@ -995,6 +1029,8 @@ def publish_app_package(
     executable_name: str,
     package_input: Path,
     icon_input: Path | None,
+    release_description: str = "",
+    release_image_input: Path | None = None,
 ) -> str:
     clean_version = version.strip()
     if not clean_version:
@@ -1053,6 +1089,14 @@ def publish_app_package(
 
     if icon_input is not None:
         copy_app_icon_to_source(hub_folder, app_data, source_folder, icon_input)
+    update_image_rel = ""
+    if release_image_input is not None:
+        update_image_rel = copy_release_image_to_source(
+            hub_folder,
+            source_folder,
+            clean_version,
+            release_image_input,
+        )
 
     package_rel = f"Releases/{zip_name}"
     zip_hash = hash_file(destination_zip)
@@ -1065,8 +1109,13 @@ def publish_app_package(
         "zip": package_rel,
         "sha256": zip_hash,
         "notes": clean_release_name,
+        "update_name": clean_release_name,
+        "update_description": release_description.strip(),
+        "date": date.today().isoformat(),
         "allowed": True,
     }
+    if update_image_rel:
+        release_data["update_image"] = update_image_rel
     replaced = False
     for index, raw_release in enumerate(releases):
         if isinstance(raw_release, dict) and str(raw_release.get("version", "")).strip() == clean_version:
@@ -1092,7 +1141,10 @@ def publish_app_package(
         "name": clean_release_name,
         "package": package_rel,
         "sha256": zip_hash,
+        "notes": release_description.strip(),
     }
+    if update_image_rel:
+        latest_data["update_image"] = update_image_rel
     (source / "latest.json").write_text(json.dumps(latest_data, indent=2), encoding="utf-8")
     return str(clean_app_id)
 
@@ -1132,6 +1184,28 @@ def resolve_app_icon_path(hub_folder: Path, app: HubApp) -> Path | None:
         for candidate in sorted(folder.iterdir()):
             if candidate.is_file() and candidate.suffix.lower() in IMAGE_EXTENSIONS:
                 return normalize_path(candidate)
+    return None
+
+
+def resolve_release_update_image_path(
+    hub_folder: Path,
+    app: HubApp,
+    release: AppRelease,
+) -> Path | None:
+    configured = release.update_image.strip()
+    if not configured:
+        return None
+    configured_path = Path(configured)
+    source = resolve_app_source_folder(hub_folder, app)
+    candidates = [configured_path] if configured_path.is_absolute() else []
+    if not configured_path.is_absolute():
+        candidates.append(hub_folder / configured_path)
+        if source is not None:
+            candidates.append(source / configured_path)
+            candidates.append(source / "UpdateImages" / configured_path)
+    for candidate in candidates:
+        if candidate.is_file() and candidate.suffix.lower() in IMAGE_EXTENSIONS:
+            return normalize_path(candidate)
     return None
 
 
@@ -2133,6 +2207,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         self.publish_executable_text = tk.StringVar()
         self.publish_package_text = tk.StringVar()
         self.publish_icon_text = tk.StringVar()
+        self.publish_release_image_text = tk.StringVar()
         self.publish_status_text = tk.StringVar(value="Choose an app package to publish.")
         self.detail_version_text = tk.StringVar()
         github_updates_enabled, github_url = load_github_update_settings()
@@ -2815,6 +2890,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
         is_create = publish_mode.startswith("create")
         is_icon_only = publish_mode.startswith("change icon")
         is_description_only = publish_mode.startswith("edit description")
+        self.publish_description_editor = None
+        self.publish_release_notes_editor = None
         if is_create:
             self.field_label(form, "New app name").grid(row=1, column=0, sticky="w", pady=6)
             ttk.Entry(
@@ -2989,16 +3066,47 @@ class SteamStyleBusinessAppHub(tk.Tk):
             subtle=True,
         ).grid(row=0, column=2)
 
+        next_row = 5
+        if is_create:
+            tk.Label(
+                form,
+                text="App description",
+                bg=COLORS["panel_alt"],
+                fg=COLORS["text"],
+                font=(FONT_FAMILY, 9, "bold"),
+            ).grid(row=next_row, column=0, sticky="nw", pady=(12, 6))
+            self.publish_description_editor = tk.Text(
+                form,
+                height=4,
+                wrap="word",
+                bg="#171a27",
+                fg=COLORS["text"],
+                insertbackground=COLORS["text"],
+                relief="flat",
+                font=(FONT_FAMILY, 10),
+                padx=10,
+                pady=8,
+            )
+            self.publish_description_editor.grid(
+                row=next_row,
+                column=1,
+                columnspan=3,
+                sticky="ew",
+                pady=(12, 6),
+                padx=(10, 0),
+            )
+            next_row += 1
+
         tk.Label(
             form,
-            text="Description",
+            text="Version updates",
             bg=COLORS["panel_alt"],
             fg=COLORS["text"],
             font=(FONT_FAMILY, 9, "bold"),
-        ).grid(row=5, column=0, sticky="nw", pady=(12, 6))
-        self.publish_description_editor = tk.Text(
+        ).grid(row=next_row, column=0, sticky="nw", pady=(12, 6))
+        self.publish_release_notes_editor = tk.Text(
             form,
-            height=5,
+            height=7,
             wrap="word",
             bg="#171a27",
             fg=COLORS["text"],
@@ -3008,17 +3116,36 @@ class SteamStyleBusinessAppHub(tk.Tk):
             padx=10,
             pady=8,
         )
-        self.publish_description_editor.grid(
-            row=5,
+        self.publish_release_notes_editor.grid(
+            row=next_row,
             column=1,
             columnspan=3,
             sticky="ew",
             pady=(12, 6),
             padx=(10, 0),
         )
+        next_row += 1
+
+        self.field_label(form, "Update image").grid(row=next_row, column=0, sticky="w", pady=6)
+        update_image_row = tk.Frame(form, bg=COLORS["panel_alt"])
+        update_image_row.grid(row=next_row, column=1, columnspan=3, sticky="ew", pady=6, padx=(10, 0))
+        update_image_row.columnconfigure(0, weight=1)
+        ttk.Entry(
+            update_image_row,
+            textvariable=self.publish_release_image_text,
+            style="Dark.TEntry",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.portal_button(
+            update_image_row,
+            "Browse",
+            self.browse_publish_release_image,
+            compact=True,
+            subtle=True,
+        ).grid(row=0, column=1)
+        next_row += 1
 
         footer = tk.Frame(form, bg=COLORS["panel_alt"])
-        footer.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(10, 0), pady=(12, 0))
+        footer.grid(row=next_row, column=1, columnspan=3, sticky="ew", padx=(10, 0), pady=(12, 0))
         footer.columnconfigure(0, weight=1)
         tk.Label(
             footer,
@@ -3061,23 +3188,29 @@ class SteamStyleBusinessAppHub(tk.Tk):
             "1. Put the company-shared hub folder in OneDrive or SharePoint sync. It "
             "must contain catalog.json and usually contains an Apps folder.\n\n"
             "2. To create a new app, choose Create new app in Publish Apps. Give it a "
-            "name, version, optional PNG/ICO icon, description, executable name, and either a "
-            ".zip, .exe, or folder. The hub creates Apps/<app>/Releases, copies or "
-            "zips the package, writes a SHA-256 hash, and adds the app to catalog.json.\n\n"
+            "name, version, optional PNG/ICO icon, app description, executable name, "
+            "version update notes, optional update image, and either a .zip, .exe, "
+            "or folder. The hub creates Apps/<app>/Releases, copies or zips the "
+            "package, writes a SHA-256 hash, and adds the app to catalog.json.\n\n"
             "3. To update an existing app, choose Update existing app, select the app, "
-            "enter the new version and update name, then provide the new package. The "
-            "hub adds or replaces that release, marks it allowed, and makes it the "
-            "default version.\n\n"
+            "enter the new version and update name, write the version update notes, "
+            "optionally attach a .png/.jpg/.gif/.ico update image, then provide the "
+            "new package. The hub adds or replaces that release, marks it allowed, "
+            "makes it the default version, and shows the notes/image as a read-only "
+            "update card on the app page.\n\n"
             "4. To change only an app icon, choose Change icon only, select the app, "
             "and pick a .png or .ico file. This copies the icon into the app folder and "
             "updates catalog.json without changing releases or latest.json.\n\n"
-            "5. Employee machines read catalog.json from the shared folder. Downloading "
+            "5. To edit the general app description, choose Edit description only. "
+            "That description is the app's store/library blurb; release-specific "
+            "changes belong in Version updates when publishing a release.\n\n"
+            "6. Employee machines read catalog.json from the shared folder. Downloading "
             "installs the selected release into the user's local app-data folder, then "
             "the hub launches that local copy. Deleting an app only removes the local "
             "installed copy from that computer.\n\n"
-            "6. Desktop app shortcuts should point back through the hub. That keeps the "
+            "7. Desktop app shortcuts should point back through the hub. That keeps the "
             "Desktop clean and lets the hub decide where the current local executable is.\n\n"
-            "7. Keep company-private release files in the shared hub folder. The public "
+            "8. Keep company-private release files in the shared hub folder. The public "
             "source repository should stay generic."
         )
         text = tk.Text(
@@ -3135,6 +3268,21 @@ class SteamStyleBusinessAppHub(tk.Tk):
         )
         if path:
             self.publish_icon_text.set(path)
+
+    def browse_publish_release_image(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Choose update image",
+            filetypes=(
+                ("Update images", "*.png *.jpg *.jpeg *.gif *.ico"),
+                ("PNG files", "*.png"),
+                ("JPEG files", "*.jpg *.jpeg"),
+                ("GIF files", "*.gif"),
+                ("ICO files", "*.ico"),
+                ("All files", "*.*"),
+            ),
+        )
+        if path:
+            self.publish_release_image_text.set(path)
 
     def publish_selected_existing_app_id(self) -> str:
         value = self.publish_app_id_text.get().strip()
@@ -3199,6 +3347,11 @@ class SteamStyleBusinessAppHub(tk.Tk):
         editor = getattr(self, "publish_description_editor", None)
         if editor is not None:
             description = editor.get("1.0", "end").strip()
+        release_notes = ""
+        release_notes_editor = getattr(self, "publish_release_notes_editor", None)
+        if release_notes_editor is not None:
+            release_notes = release_notes_editor.get("1.0", "end").strip()
+        release_image_text = self.publish_release_image_text.get().strip()
         try:
             published_app_id = publish_app_package(
                 self.hub_folder,
@@ -3212,6 +3365,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
                 executable_name=self.publish_executable_text.get(),
                 package_input=Path(package_text),
                 icon_input=Path(icon_text) if icon_text else None,
+                release_description=release_notes,
+                release_image_input=Path(release_image_text) if release_image_text else None,
             )
         except Exception as exc:
             self.publish_status_text.set("Publish failed.")
@@ -4348,17 +4503,34 @@ class SteamStyleBusinessAppHub(tk.Tk):
             )
             card.grid(row=row, column=0, sticky="ew", pady=(0, 10))
             card.columnconfigure(1, weight=1)
+
+            media = tk.Frame(card, bg=COLORS["panel_alt"])
+            media.grid(row=0, column=0, rowspan=3, sticky="nw", padx=(0, 16))
+            image = self.load_release_image(app, release, 150)
+            if image:
+                tk.Label(
+                    media,
+                    image=image,
+                    bg=COLORS["panel_alt"],
+                    width=160,
+                    height=96,
+                ).grid(row=0, column=0, sticky="nw")
+
             badge_bg = COLORS["accent"] if release.version == app.default_version else COLORS["panel_high"]
             tk.Label(
-                card,
+                media,
                 text=release.version,
                 bg=badge_bg,
                 fg=COLORS["background"] if release.version == app.default_version else COLORS["text"],
                 font=(FONT_FAMILY, 10, "bold"),
                 padx=12,
                 pady=7,
-            ).grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 14))
-            title_bits = [release.notes or f"Release {release.version}"]
+            ).grid(row=1 if image else 0, column=0, sticky="w", pady=(8 if image else 0, 0))
+
+            title = release.update_name or f"Release {release.version}"
+            title_bits = [title]
+            if release.date:
+                title_bits.append(release.date)
             if release.version == app.default_version:
                 title_bits.append("Default")
             if installed_record is not None and installed_record.version == release.version:
@@ -4371,17 +4543,41 @@ class SteamStyleBusinessAppHub(tk.Tk):
                 font=(FONT_FAMILY, 11, "bold"),
                 anchor="w",
             ).grid(row=0, column=1, sticky="ew")
-            detail = release.notes or "No update notes were added for this release."
+            detail = (
+                release.update_description
+                or release.notes
+                or "No detailed update notes were added for this release."
+            )
             tk.Label(
                 card,
                 text=detail,
                 bg=COLORS["panel_alt"],
                 fg=COLORS["muted"],
                 font=(FONT_FAMILY, 9),
-                wraplength=1120,
+                wraplength=980 if image else 1120,
                 justify="left",
                 anchor="w",
             ).grid(row=1, column=1, sticky="ew", pady=(6, 0))
+
+    def load_release_image(
+        self,
+        app: HubApp,
+        release: AppRelease,
+        max_size: int,
+    ) -> tk.PhotoImage | None:
+        if self.hub_folder is None:
+            return None
+        key = f"release:{app.app_id}:{release.version}:{release.update_image}:{max_size}"
+        if key in self.icon_images:
+            return self.icon_images[key]
+        path = resolve_release_update_image_path(self.hub_folder, app, release)
+        if path is None:
+            return None
+        image = load_icon_photo_image(path, max_size)
+        if image is None:
+            return None
+        self.icon_images[key] = image
+        return image
 
     def default_detail_version(self, app: HubApp) -> str:
         return latest_app_version(app) or app.default_version

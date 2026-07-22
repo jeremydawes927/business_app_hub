@@ -64,6 +64,36 @@ class CatalogTests(unittest.TestCase):
 
         self.assertEqual("icon.png", catalog.apps[0].icon_path)
 
+    def test_release_update_fields_parse_from_catalog(self):
+        catalog = hub.parse_catalog_text(
+            json.dumps(
+                {
+                    "apps": [
+                        {
+                            "id": "inventory-helper",
+                            "name": "Inventory Helper",
+                            "releases": [
+                                {
+                                    "version": "1.0.0",
+                                    "notes": "Stable",
+                                    "update_name": "Launch Notes",
+                                    "update_description": "Added the first approved release.",
+                                    "update_image": "UpdateImages/1.0.0.png",
+                                    "date": "2026-07-22",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+
+        release = catalog.apps[0].releases[0]
+        self.assertEqual("Launch Notes", release.update_name)
+        self.assertEqual("Added the first approved release.", release.update_description)
+        self.assertEqual("UpdateImages/1.0.0.png", release.update_image)
+        self.assertEqual("2026-07-22", release.date)
+
     def test_icon_path_auto_discovers_app_folder_icon(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             folder = Path(temp_dir)
@@ -187,6 +217,7 @@ class CatalogTests(unittest.TestCase):
                 executable_name="",
                 package_input=package,
                 icon_input=None,
+                release_description="Initial app package with install support.",
             )
 
             catalog = hub.load_catalog(folder)
@@ -197,6 +228,9 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual("Demo Tool.exe", catalog.apps[0].executable_name)
             release = catalog.apps[0].releases[0]
             self.assertEqual("First release", release.notes)
+            self.assertEqual("First release", release.update_name)
+            self.assertEqual("Initial app package with install support.", release.update_description)
+            self.assertTrue(release.date)
             zip_path = folder / catalog.apps[0].source_folder / release.package
             self.assertTrue(zip_path.is_file())
             self.assertTrue((folder / catalog.apps[0].source_folder / "latest.json").is_file())
@@ -232,6 +266,39 @@ class CatalogTests(unittest.TestCase):
                     app = hub.load_catalog(folder).apps[0]
                     self.assertEqual(icon_name, app.icon_path)
                     self.assertTrue((folder / app.source_folder / icon_name).is_file())
+
+    def test_publish_release_can_store_update_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            (folder / "catalog.json").write_text(
+                json.dumps({"hub_version": "1.0.0", "apps": []}),
+                encoding="utf-8",
+            )
+            package = folder / "Demo Tool.exe"
+            package.write_bytes(b"fake executable")
+            update_image = folder / "release.png"
+            update_image.write_bytes(b"fake png path test")
+
+            hub.publish_app_package(
+                folder,
+                mode="Create new app",
+                existing_app_id="",
+                app_name="Demo Tool",
+                app_id="",
+                description="A test app.",
+                version="1.2.3",
+                release_name="First release",
+                executable_name="",
+                package_input=package,
+                icon_input=None,
+                release_description="Added the first release.",
+                release_image_input=update_image,
+            )
+
+            app = hub.load_catalog(folder).apps[0]
+            release = app.releases[0]
+            self.assertEqual("UpdateImages/1.2.3.png", release.update_image)
+            self.assertTrue((folder / app.source_folder / release.update_image).is_file())
 
     def test_update_app_icon_only_does_not_change_releases(self):
         with tempfile.TemporaryDirectory() as temp_dir:

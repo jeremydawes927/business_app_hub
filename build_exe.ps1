@@ -15,6 +15,28 @@ $pythonLibTkinterPath = Join-Path $pythonRoot "Lib\tkinter"
 $pythonTclPath = Join-Path $pythonRoot "tcl"
 $pythonDllPath = Join-Path $pythonRoot "DLLs"
 
+function Invoke-WithRetry {
+  param(
+    [scriptblock]$Action,
+    [string]$Name,
+    [int]$Attempts = 8,
+    [int]$DelayMilliseconds = 750
+  )
+
+  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    try {
+      & $Action
+      return
+    } catch {
+      if ($attempt -eq $Attempts) {
+        throw
+      }
+      Write-Host "$Name failed on attempt $attempt of $Attempts. Retrying..."
+      Start-Sleep -Milliseconds $DelayMilliseconds
+    }
+  }
+}
+
 if (-not (Test-Path -LiteralPath $sourcePath)) {
   throw "Could not find source file: $sourcePath"
 }
@@ -67,7 +89,35 @@ if ($ReleaseRoot) {
   if (Test-Path $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
   }
-  Compress-Archive -Path (Join-Path $distRoot "*") -DestinationPath $zipPath -Force
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("BusinessAppHubPackage_" + [System.Guid]::NewGuid().ToString("N"))
+  $stagingDist = Join-Path $stagingRoot "Business App Hub"
+  try {
+    Invoke-WithRetry -Name "Copy build output" -Action {
+      if (Test-Path -LiteralPath $stagingRoot) {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+      }
+      New-Item -ItemType Directory -Force -Path $stagingDist | Out-Null
+      Get-ChildItem -LiteralPath $distRoot -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $stagingDist -Recurse -Force
+      }
+    }
+    Invoke-WithRetry -Name "Create release zip" -Action {
+      if (Test-Path -LiteralPath $zipPath) {
+        Remove-Item -LiteralPath $zipPath -Force
+      }
+      [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $stagingDist,
+        $zipPath,
+        [System.IO.Compression.CompressionLevel]::Optimal,
+        $false
+      )
+    }
+  } finally {
+    if (Test-Path -LiteralPath $stagingRoot) {
+      Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
   $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash
   $manifest = [ordered]@{
     version = $Version
