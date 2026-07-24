@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 import sys
@@ -409,6 +410,12 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(app_id, record.app_id)
             self.assertTrue(Path(record.executable_path).is_file())
             self.assertTrue(Path(record.install_folder).is_dir())
+            self.assertTrue(
+                (Path(record.install_folder) / hub.INSTALL_MARKER_NAME).is_file()
+            )
+            self.assertTrue(
+                (hub.app_install_folder(app_id, install_root) / hub.INSTALL_MARKER_NAME).is_file()
+            )
 
     def test_install_app_release_keeps_existing_app_folder(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -509,6 +516,25 @@ class CatalogTests(unittest.TestCase):
 
             self.assertEqual("1.0.0", record.version)
             self.assertIn("1.0.0", record.install_folder)
+
+    def test_safe_extract_rejects_parent_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            zip_path = folder / "bad.zip"
+            with zipfile.ZipFile(zip_path, "w") as zip_file:
+                zip_file.writestr("../escape.txt", "bad")
+
+            with self.assertRaises(ValueError):
+                hub.safe_extract_zip(zip_path, folder / "extract")
+
+    def test_protected_update_target_blocks_broad_user_folders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            desktop = folder / "Desktop"
+            dedicated = desktop / "Business App Hub 0.1.5"
+
+            self.assertTrue(hub.is_protected_update_target(desktop))
+            self.assertFalse(hub.is_protected_update_target(dedicated))
 
 
 if __name__ == "__main__":

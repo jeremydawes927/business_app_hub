@@ -82,6 +82,18 @@ if (-not (Test-Path (Join-Path $distRoot "Business App Hub.exe"))) {
   throw "Build finished, but Business App Hub.exe was not found in $distRoot."
 }
 
+$markerPath = Join-Path $distRoot ".business_app_hub_install_marker.json"
+$marker = [ordered]@{
+  marker_type = "business_app_hub_install_marker"
+  app_id = "business-app-hub"
+  install_kind = "self"
+  exe_name = "Business App Hub.exe"
+  version = $Version
+  created_at = (Get-Date).ToString("s")
+  updated_at = (Get-Date).ToString("s")
+}
+$marker | ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding UTF8
+
 if ($ReleaseRoot) {
   $releaseDir = Join-Path $ReleaseRoot "Releases"
   New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null

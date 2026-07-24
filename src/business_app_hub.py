@@ -14,7 +14,7 @@ import urllib.request
 import webbrowser
 import zipfile
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
@@ -27,7 +27,7 @@ except ImportError:  # Pillow is optional; PNG display still works through Tk.
 
 
 APP_NAME = "Business App Hub"
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.1.6"
 HUB_FOLDER_NAME = "Business App Hub"
 FONT_FAMILY = "Georgia"
 APP_DATA_FOLDER = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Business App Hub"
@@ -37,6 +37,25 @@ SETTINGS_FILE = APP_DATA_FOLDER / "settings.json"
 CATALOG_FILE_NAME = "catalog.json"
 APPS_FOLDER_NAME = "Apps"
 BUNDLED_HEADER_IMAGE_NAME = "hub_header.png"
+INSTALL_MARKER_NAME = ".business_app_hub_install_marker.json"
+INSTALL_MARKER_TYPE = "business_app_hub_install_marker"
+SELF_APP_ID = "business-app-hub"
+PROTECTED_UPDATE_FOLDER_NAMES = {
+    "",
+    "desktop",
+    "documents",
+    "downloads",
+    "music",
+    "pictures",
+    "videos",
+    "users",
+    "windows",
+    "program files",
+    "program files (x86)",
+    "system32",
+    "syswow64",
+    "onedrive",
+}
 DEFAULT_GITHUB_RELEASES_API_URL = (
     "https://api.github.com/repos/jeremydawes927/business_app_hub/releases/latest"
 )
@@ -97,6 +116,49 @@ COLORS = {
     "scrollbar_thumb": "#347eb8",
     "scrollbar_thumb_hover": "#68b8ff",
 }
+
+VERSION_HISTORY = (
+    {
+        "version": "0.1.6",
+        "name": "Safety and Polish Update",
+        "date": "2026-07-24",
+        "changes": (
+            "Added safer update handling with install markers, ZIP path validation, "
+            "staged extraction, temp backups, and protected-folder checks.",
+            "Added app release update cards with version notes and optional release images.",
+            "Improved app pages with cleaner descriptions, app action controls, and shortcut support.",
+            "Added this version-history page and one-time update summary popup.",
+        ),
+    },
+    {
+        "version": "0.1.5",
+        "name": "Release Notes Update",
+        "date": "2026-07-23",
+        "changes": (
+            "Added richer release notes for managed apps.",
+            "Improved admin publishing fields for app updates and new app entries.",
+        ),
+    },
+    {
+        "version": "0.1.4",
+        "name": "Admin Controls Update",
+        "date": "2026-07-23",
+        "changes": (
+            "Added local admin mode controls for publishing tabs.",
+            "Improved app update and rollback workflow.",
+        ),
+    },
+    {
+        "version": "0.1.3",
+        "name": "Shortcut and Hub Settings Update",
+        "date": "2026-07-22",
+        "changes": (
+            "Added Desktop shortcut creation.",
+            "Moved hub folder controls into Settings.",
+            "Improved the Steam-inspired layout and app cards.",
+        ),
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -677,6 +739,113 @@ def is_path_inside(path: Path, parent: Path) -> bool:
         return False
 
 
+def install_marker_path(folder: Path) -> Path:
+    return normalize_path(folder) / INSTALL_MARKER_NAME
+
+
+def read_install_marker(folder: Path) -> dict[str, object] | None:
+    marker = install_marker_path(folder)
+    if not marker.is_file():
+        return None
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("marker_type") != INSTALL_MARKER_TYPE:
+        return None
+    return data
+
+
+def write_install_marker(
+    folder: Path,
+    *,
+    app_id: str,
+    install_kind: str,
+    exe_name: str,
+    version: str,
+) -> Path:
+    marker = install_marker_path(folder)
+    existing = read_install_marker(folder) or {}
+    now = datetime.now().isoformat(timespec="seconds")
+    payload = {
+        "marker_type": INSTALL_MARKER_TYPE,
+        "app_id": app_id,
+        "install_kind": install_kind,
+        "exe_name": exe_name,
+        "version": version,
+        "created_at": str(existing.get("created_at") or now),
+        "updated_at": now,
+    }
+    marker.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return marker
+
+
+def is_protected_update_target(folder: Path) -> bool:
+    target = normalize_path(folder)
+    if target == normalize_path(Path(target.anchor)):
+        return True
+    try:
+        if target == normalize_path(Path.home()):
+            return True
+    except OSError:
+        pass
+    return target.name.strip().lower() in PROTECTED_UPDATE_FOLDER_NAMES
+
+
+def validate_zip_member_paths(zip_path: Path) -> None:
+    with zipfile.ZipFile(zip_path) as zip_file:
+        for info in zip_file.infolist():
+            raw_name = info.filename.strip()
+            normalized_name = raw_name.replace("\\", "/")
+            parts = [part for part in normalized_name.split("/") if part]
+            if (
+                not raw_name
+                or normalized_name.startswith("/")
+                or (len(normalized_name) >= 2 and normalized_name[1] == ":")
+                or any(part == ".." for part in parts)
+            ):
+                raise ValueError(
+                    f"Refusing to extract unsafe ZIP entry: {info.filename!r}"
+                )
+
+
+def safe_extract_zip(zip_path: Path, destination: Path) -> None:
+    validate_zip_member_paths(zip_path)
+    with zipfile.ZipFile(zip_path) as zip_file:
+        zip_file.extractall(destination)
+
+
+def ensure_self_update_marker(target_folder: Path, exe_name: str) -> None:
+    target = normalize_path(target_folder)
+    if is_protected_update_target(target):
+        raise ValueError(
+            f"Refusing to self-update from a broad folder:\n\n{target}\n\n"
+            "Move Business App Hub into its own extracted folder, then create/use a shortcut."
+        )
+    if not (target / exe_name).is_file():
+        raise FileNotFoundError(
+            f"Could not confirm the running hub executable:\n\n{target / exe_name}"
+        )
+    if not (target / "_internal").is_dir():
+        raise FileNotFoundError(
+            f"Could not confirm the packaged _internal folder:\n\n{target / '_internal'}"
+        )
+    marker = read_install_marker(target)
+    if marker is not None and str(marker.get("app_id", "")) != SELF_APP_ID:
+        raise ValueError(
+            f"Install marker in this folder belongs to another app:\n\n{target}"
+        )
+    write_install_marker(
+        target,
+        app_id=SELF_APP_ID,
+        install_kind="self",
+        exe_name=exe_name,
+        version=APP_VERSION,
+    )
+
+
 def sorted_app_releases(app: HubApp) -> tuple[AppRelease, ...]:
     return tuple(
         sorted(
@@ -840,11 +1009,42 @@ def install_app_release(
         install_root,
     ):
         raise ValueError("Refusing to install outside the hub install folder.")
-    install_folder.mkdir(parents=True, exist_ok=True)
+    if is_protected_update_target(install_root) or is_protected_update_target(install_base):
+        raise ValueError("Refusing to install into a broad system/user folder.")
+    install_base.mkdir(parents=True, exist_ok=True)
+    write_install_marker(
+        install_base,
+        app_id=app.app_id,
+        install_kind="managed-app-root",
+        exe_name=app.executable_name or "",
+        version=release.version,
+    )
+    staging_root = install_base / ".staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    stage_folder = normalize_path(
+        Path(
+            tempfile.mkdtemp(
+                prefix=f"{safe_version_folder_name(release.version)}_",
+                dir=staging_root,
+            )
+        )
+    )
     try:
-        with zipfile.ZipFile(package_path) as zip_file:
-            zip_file.extractall(install_folder)
+        safe_extract_zip(package_path, stage_folder)
+        executable = find_installed_executable(stage_folder, app)
+        if executable is None:
+            raise FileNotFoundError(
+                f"{app.name} installed, but no launchable .exe was found."
+            )
+        if install_folder.exists():
+            install_folder = next_available_version_install_folder(
+                app.app_id,
+                release.version,
+                install_root,
+            )
+        shutil.move(str(stage_folder), str(install_folder))
     except Exception:
+        shutil.rmtree(stage_folder, ignore_errors=True)
         shutil.rmtree(install_folder, ignore_errors=True)
         raise
     executable = find_installed_executable(install_folder, app)
@@ -853,6 +1053,13 @@ def install_app_release(
         raise FileNotFoundError(
             f"{app.name} installed, but no launchable .exe was found."
         )
+    write_install_marker(
+        install_folder,
+        app_id=app.app_id,
+        install_kind="managed-app-version",
+        exe_name=executable.name,
+        version=release.version,
+    )
     return InstallRecord(
         app_id=app.app_id,
         version=release.version,
@@ -876,6 +1083,15 @@ def delete_app_install(app: HubApp, install_root: Path = INSTALLS_FOLDER) -> Non
             continue
         if not is_path_inside(install_folder, root):
             raise ValueError("Refusing to delete outside the hub install folder.")
+        marker = read_install_marker(install_folder)
+        if marker is not None and str(marker.get("app_id", "")) != app.app_id:
+            raise ValueError(
+                f"Refusing to delete an install folder marked for another app:\n\n{install_folder}"
+            )
+        if install_folder != app_folder and marker is None:
+            raise ValueError(
+                f"Refusing to delete an unexpected install folder without a marker:\n\n{install_folder}"
+            )
         shutil.rmtree(install_folder)
     shortcut = app_desktop_shortcut_path(app)
     if shortcut.exists():
@@ -1392,6 +1608,9 @@ def running_hub_install_folder() -> Path:
 def write_self_update_script(zip_path: Path, target_folder: Path) -> Path:
     script_path = APP_DATA_FOLDER / "hub_self_update.ps1"
     exe_name = Path(sys.executable).name if getattr(sys, "frozen", False) else f"{APP_NAME}.exe"
+    blocked_names = ",".join(
+        powershell_string(name) for name in sorted(PROTECTED_UPDATE_FOLDER_NAMES) if name
+    )
     script = "\n".join(
         [
             "$ErrorActionPreference = 'Stop'",
@@ -1399,9 +1618,31 @@ def write_self_update_script(zip_path: Path, target_folder: Path) -> Path:
             f"$zipPath = {powershell_string(zip_path)}",
             f"$target = {powershell_string(target_folder)}",
             f"$exeName = {powershell_string(exe_name)}",
+            f"$blockedNames = @({blocked_names})",
+            f"$markerName = {powershell_string(INSTALL_MARKER_NAME)}",
             "$stage = Join-Path ([System.IO.Path]::GetTempPath()) ('BusinessAppHubUpdate_' + [guid]::NewGuid().ToString())",
+            "$backupRoot = Join-Path $env:LOCALAPPDATA 'Business App Hub\\Backups'",
+            "$backup = Join-Path $backupRoot ('HubSelfUpdate_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))",
             "try { Wait-Process -Id $pidToWait -Timeout 45 -ErrorAction SilentlyContinue } catch { }",
+            "$targetLeaf = (Split-Path -Leaf $target).ToLowerInvariant()",
+            "$targetRoot = [System.IO.Path]::GetPathRoot($target)",
+            "if ($target.TrimEnd('\\') -eq $targetRoot.TrimEnd('\\')) {",
+            "    throw ('Refusing to update drive root: ' + $target)",
+            "}",
+            "if ($blockedNames -contains $targetLeaf) {",
+            "    throw ('Refusing to update broad folder: ' + $target)",
+            "}",
+            "if (-not (Test-Path -LiteralPath (Join-Path $target $exeName))) {",
+            "    throw ('Refusing to update because the expected executable was not found: ' + (Join-Path $target $exeName))",
+            "}",
+            "if (-not (Test-Path -LiteralPath (Join-Path $target '_internal'))) {",
+            "    throw ('Refusing to update because the expected _internal folder was not found: ' + (Join-Path $target '_internal'))",
+            "}",
+            "if (-not (Test-Path -LiteralPath (Join-Path $target $markerName))) {",
+            "    throw ('Refusing to update because the Business App Hub install marker was not found: ' + (Join-Path $target $markerName))",
+            "}",
             "New-Item -ItemType Directory -Force -Path $stage | Out-Null",
+            "New-Item -ItemType Directory -Force -Path $backup | Out-Null",
             "Expand-Archive -LiteralPath $zipPath -DestinationPath $stage -Force",
             "$payload = $stage",
             "if (-not (Test-Path -LiteralPath (Join-Path $payload $exeName))) {",
@@ -1415,7 +1656,23 @@ def write_self_update_script(zip_path: Path, target_folder: Path) -> Path:
             "if (-not (Test-Path -LiteralPath (Join-Path $payload $exeName))) {",
             "    throw ('Updated hub package did not contain ' + $exeName)",
             "}",
-            "Get-ChildItem -LiteralPath $payload -Force | Copy-Item -Destination $target -Recurse -Force",
+            "$payloadItems = @(Get-ChildItem -LiteralPath $payload -Force)",
+            "foreach ($item in $payloadItems) {",
+            "    $existing = Join-Path $target $item.Name",
+            "    if (Test-Path -LiteralPath $existing) {",
+            "        Copy-Item -LiteralPath $existing -Destination $backup -Recurse -Force",
+            "    }",
+            "}",
+            "try {",
+            "    foreach ($item in $payloadItems) {",
+            "        Copy-Item -LiteralPath $item.FullName -Destination $target -Recurse -Force",
+            "    }",
+            "} catch {",
+            "    if (Test-Path -LiteralPath $backup) {",
+            "        Get-ChildItem -LiteralPath $backup -Force | Copy-Item -Destination $target -Recurse -Force -ErrorAction SilentlyContinue",
+            "    }",
+            "    throw",
+            "}",
             "Start-Process -FilePath (Join-Path $target $exeName)",
             "Start-Sleep -Seconds 2",
             "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue",
@@ -1433,6 +1690,8 @@ def start_hub_self_update(zip_path: Path) -> None:
     target_folder = running_hub_install_folder()
     if not target_folder.exists():
         raise FileNotFoundError(f"Hub install folder was not found:\n\n{target_folder}")
+    exe_name = Path(sys.executable).name
+    ensure_self_update_marker(target_folder, exe_name)
     script_path = write_self_update_script(zip_path, target_folder)
     subprocess.Popen(
         [
@@ -2219,9 +2478,19 @@ class SteamStyleBusinessAppHub(tk.Tk):
 
         self.apply_theme()
         self.build_ui()
+        self.after(20, self.open_full_screen)
         self.after(100, self.start_folder_discovery)
+        self.after(450, self.show_current_version_notes_once)
         self.after(1200, self.check_github_updates_on_startup)
         self.after(650, self.pulse_app_update_alert)
+
+    def open_full_screen(self) -> None:
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            screen_width = self.winfo_screenwidth()
+            screen_height = self.winfo_screenheight()
+            self.geometry(f"{screen_width}x{screen_height}+0+0")
 
     def apply_theme(self) -> None:
         self.configure(bg=COLORS["background"])
@@ -2323,15 +2592,16 @@ class SteamStyleBusinessAppHub(tk.Tk):
 
         self.nav_frame = tk.Frame(chrome, bg=COLORS["background"], padx=20)
         self.nav_frame.grid(row=1, column=0, sticky="ew", pady=(10, 8))
-        self.nav_frame.columnconfigure(5, weight=1)
-        self.nav_order = ("my", "find", "publish", "guide", "settings")
+        self.nav_frame.columnconfigure(6, weight=1)
+        self.nav_order = ("my", "find", "publish", "guide", "history", "settings")
         self.admin_nav_views = {"publish", "guide"}
         self.nav_buttons: dict[str, tk.Label] = {}
         self.build_nav_tab("my", "MY APPS", 0)
         self.build_nav_tab("find", "FIND APPS", 1)
         self.build_nav_tab("publish", "PUBLISH APPS", 2)
         self.build_nav_tab("guide", "UPDATE GUIDE", 3)
-        self.build_nav_tab("settings", "SETTINGS", 4)
+        self.build_nav_tab("history", "VERSION HISTORY", 4)
+        self.build_nav_tab("settings", "SETTINGS", 5)
 
         self.nav_search_frame = tk.Frame(self.nav_frame, bg=COLORS["background"])
         self.nav_search_frame.grid(row=0, column=6, sticky="e")
@@ -2580,7 +2850,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         if view in getattr(self, "admin_nav_views", set()) and not self.device_admin.get():
             view = "settings"
         self.current_view = view
-        if view in ("my", "find", "publish", "guide", "settings"):
+        if view in ("my", "find", "publish", "guide", "history", "settings"):
             self.detail_back_view = view
         self.paint_nav()
         self.render_current_view()
@@ -2717,6 +2987,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
             self.render_publish_apps()
         elif self.current_view == "guide":
             self.render_update_guide()
+        elif self.current_view == "history":
+            self.render_version_history()
         elif self.current_view == "settings":
             self.render_settings()
         elif self.current_view == "detail":
@@ -2728,6 +3000,188 @@ class SteamStyleBusinessAppHub(tk.Tk):
                 self.render_app_detail_page(app)
         else:
             self.render_find_apps()
+
+    def current_version_history_entry(self) -> dict[str, object]:
+        for entry in VERSION_HISTORY:
+            if str(entry.get("version", "")).strip() == APP_VERSION:
+                return entry
+        return {
+            "version": APP_VERSION,
+            "name": "Current Update",
+            "date": "",
+            "changes": ("No update notes were added for this version.",),
+        }
+
+    def show_current_version_notes_once(self) -> None:
+        settings = app_data_settings()
+        seen_key = f"seen_version_notes_{APP_VERSION}"
+        if settings.get(seen_key):
+            return
+        entry = self.current_version_history_entry()
+        self.show_version_notes_popup(entry, seen_key)
+
+    def show_version_notes_popup(self, entry: dict[str, object], seen_key: str) -> None:
+        changes = entry.get("changes", ())
+        if isinstance(changes, str):
+            changes = (changes,)
+        version = str(entry.get("version", APP_VERSION))
+        update_name = str(entry.get("name", "Current Update"))
+        date_text = str(entry.get("date", "")).strip()
+
+        popup = tk.Toplevel(self)
+        popup.title(f"What is New - {version} - {update_name}")
+        popup.configure(bg=COLORS["background"])
+        popup.transient(self)
+        popup.grab_set()
+        popup.resizable(False, False)
+        popup.columnconfigure(0, weight=1)
+
+        body = tk.Frame(
+            popup,
+            bg=COLORS["background"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            padx=26,
+            pady=24,
+        )
+        body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+
+        tk.Label(
+            body,
+            text=f"{version} - {update_name}",
+            bg=COLORS["background"],
+            fg=COLORS["text"],
+            font=(FONT_FAMILY, 18, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+
+        subtitle = f"Business App Hub is now on {version} - {update_name}."
+        if date_text:
+            subtitle += f"\nReleased: {date_text}"
+        tk.Label(
+            body,
+            text=subtitle,
+            bg=COLORS["background"],
+            fg=COLORS["muted"],
+            font=(FONT_FAMILY, 10, "bold"),
+            anchor="w",
+            justify="left",
+        ).grid(row=1, column=0, sticky="ew", pady=(10, 14))
+
+        notes = tk.Frame(body, bg=COLORS["panel_alt"], padx=16, pady=14)
+        notes.grid(row=2, column=0, sticky="ew")
+        notes.columnconfigure(0, weight=1)
+        notes_text = "\n".join(f"- {change}" for change in changes)
+        tk.Label(
+            notes,
+            text=f"Changes:\n{notes_text}",
+            bg=COLORS["panel_alt"],
+            fg=COLORS["text"],
+            font=(FONT_FAMILY, 10),
+            justify="left",
+            anchor="w",
+            wraplength=680,
+        ).grid(row=0, column=0, sticky="ew")
+
+        button_row = tk.Frame(body, bg=COLORS["background"])
+        button_row.grid(row=3, column=0, sticky="e", pady=(18, 0))
+
+        def close_popup(*, open_history: bool = False) -> None:
+            settings = app_data_settings()
+            settings[seen_key] = True
+            save_app_data_settings(settings)
+            popup.destroy()
+            if open_history:
+                self.switch_view("history")
+
+        self.portal_button(
+            button_row,
+            "View Version History",
+            lambda: close_popup(open_history=True),
+            subtle=True,
+        ).grid(row=0, column=0, padx=(0, 10))
+        self.portal_button(
+            button_row,
+            "Continue",
+            close_popup,
+            accent=True,
+        ).grid(row=0, column=1)
+
+        popup.update_idletasks()
+        width = popup.winfo_width()
+        height = popup.winfo_height()
+        x = self.winfo_rootx() + max((self.winfo_width() - width) // 2, 0)
+        y = self.winfo_rooty() + max((self.winfo_height() - height) // 2, 0)
+        popup.geometry(f"+{x}+{y}")
+        popup.protocol("WM_DELETE_WINDOW", close_popup)
+
+    def render_version_history(self) -> None:
+        self.content.columnconfigure(0, weight=1)
+        self.content.rowconfigure(0, weight=1)
+        panel = self.portal_panel(self.content)
+        panel.grid(row=0, column=0, sticky="nsew")
+        panel.columnconfigure(0, weight=1)
+        panel.rowconfigure(0, weight=1)
+
+        _canvas, inner = self.scroll_area(panel, row=0)
+        inner.columnconfigure(0, weight=1)
+        page = tk.Frame(inner, bg=COLORS["panel"])
+        page.grid(row=0, column=0, sticky="new", padx=42, pady=28)
+        page.columnconfigure(0, weight=1)
+
+        tk.Label(
+            page,
+            text="Version History",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=(FONT_FAMILY, 24, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            page,
+            text="Hub updates, names, and changes.",
+            bg=COLORS["panel"],
+            fg=COLORS["muted"],
+            font=(FONT_FAMILY, 10),
+        ).grid(row=1, column=0, sticky="w", pady=(4, 24))
+
+        for row, entry in enumerate(VERSION_HISTORY, start=2):
+            card = tk.Frame(
+                page,
+                bg=COLORS["panel_alt"],
+                highlightbackground=COLORS["border"],
+                highlightthickness=1,
+                padx=18,
+                pady=15,
+            )
+            card.grid(row=row, column=0, sticky="ew", pady=(0, 12))
+            card.columnconfigure(0, weight=1)
+            header_parts = [f"v{entry.get('version', '')}"]
+            if entry.get("name"):
+                header_parts.append(str(entry["name"]))
+            if entry.get("date"):
+                header_parts.append(str(entry["date"]))
+            tk.Label(
+                card,
+                text="  |  ".join(header_parts),
+                bg=COLORS["panel_alt"],
+                fg=COLORS["text"],
+                font=(FONT_FAMILY, 13, "bold"),
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew")
+            changes = entry.get("changes", ())
+            if isinstance(changes, str):
+                changes = (changes,)
+            tk.Label(
+                card,
+                text="\n".join(f"- {change}" for change in changes),
+                bg=COLORS["panel_alt"],
+                fg=COLORS["muted"],
+                font=(FONT_FAMILY, 10),
+                justify="left",
+                anchor="w",
+                wraplength=1120,
+            ).grid(row=1, column=0, sticky="ew", pady=(8, 0))
 
     def reload_install_state(self) -> None:
         self.install_records = load_install_records()
@@ -3525,6 +3979,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         try:
             self.download_progress.set(86)
             self.download_text.set("Installing hub update and reopening...")
+            validate_zip_member_paths(zip_path)
             start_hub_self_update(zip_path)
         except Exception as exc:
             self.download_progress.set(0)
@@ -4403,6 +4858,28 @@ class SteamStyleBusinessAppHub(tk.Tk):
             font=(FONT_FAMILY, 9),
         ).grid(row=0, column=4, sticky="w")
 
+        action_row = tk.Frame(page, bg=COLORS["panel"])
+        action_row.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        for col in range(3):
+            action_row.columnconfigure(col, weight=1)
+        self.portal_button(
+            action_row,
+            "Open Source Folder",
+            self.open_selected_source_folder,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.portal_button(
+            action_row,
+            "Create Shortcut",
+            self.create_selected_app_shortcut,
+            state="normal" if installed else "disabled",
+        ).grid(row=0, column=1, sticky="ew", padx=6)
+        self.portal_button(
+            action_row,
+            "Delete Local Install",
+            self.delete_selected_app,
+            state="normal" if installed else "disabled",
+        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
         description_panel = tk.Frame(
             page,
             bg=COLORS["panel_alt"],
@@ -4411,7 +4888,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
             padx=20,
             pady=16,
         )
-        description_panel.grid(row=2, column=0, sticky="ew", pady=(14, 14))
+        description_panel.grid(row=3, column=0, sticky="ew", pady=(14, 14))
         description_panel.columnconfigure(0, weight=1)
         tk.Label(
             description_panel,
@@ -4434,7 +4911,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         ).grid(row=1, column=0, sticky="ew", pady=(8, 0))
 
         releases_panel = tk.Frame(page, bg=COLORS["panel"])
-        releases_panel.grid(row=3, column=0, sticky="ew", pady=(16, 0))
+        releases_panel.grid(row=4, column=0, sticky="ew", pady=(16, 0))
         releases_panel.columnconfigure(0, weight=1)
         releases_panel.rowconfigure(1, weight=1)
         tk.Label(
@@ -4445,31 +4922,6 @@ class SteamStyleBusinessAppHub(tk.Tk):
             font=(FONT_FAMILY, 12, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.render_release_update_cards(releases_panel, app)
-
-        action_row = tk.Frame(page, bg=COLORS["panel"])
-        action_row.grid(row=4, column=0, sticky="ew", pady=(14, 0))
-        for col in range(3):
-            action_row.columnconfigure(col, weight=1)
-        self.portal_button(
-            action_row,
-            "Open Source Folder",
-            self.open_selected_source_folder,
-            subtle=True,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.portal_button(
-            action_row,
-            "Create Shortcut",
-            self.create_selected_app_shortcut,
-            state="normal" if installed else "disabled",
-            subtle=True,
-        ).grid(row=0, column=1, sticky="ew", padx=6)
-        self.portal_button(
-            action_row,
-            "Delete Local Install",
-            self.delete_selected_app,
-            state="normal" if installed else "disabled",
-            subtle=True,
-        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
     def render_release_update_cards(self, parent: tk.Widget, app: HubApp) -> None:
         releases = sorted_app_releases(app)
@@ -4597,6 +5049,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
         if record is None or not Path(record.executable_path).is_file():
             return "Download"
         if selected_version and record.version != selected_version:
+            if is_newer_version(selected_version, record.version):
+                return "Update"
             return "Change Version"
         return "Update / Repair"
 
@@ -4762,10 +5216,18 @@ class SteamStyleBusinessAppHub(tk.Tk):
         if record is None:
             messagebox.showinfo(APP_NAME, f"{app.name} is not installed on this computer yet.")
             return
+        popup: tk.Toplevel | None = None
         try:
+            popup = show_status_popup(self, "App Loading", f"Opening {app.name}...")
+            self.update()
             launch_install_record(record)
         except Exception as exc:
+            if popup is not None:
+                popup.destroy()
             messagebox.showerror(APP_NAME, f"Could not launch {app.name}:\n\n{exc}")
+            return
+        if popup is not None:
+            self.after(1400, popup.destroy)
 
     def launch_selected_placeholder(self) -> None:
         self.launch_selected_app()
