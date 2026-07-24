@@ -27,7 +27,7 @@ except ImportError:  # Pillow is optional; PNG display still works through Tk.
 
 
 APP_NAME = "Business App Hub"
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 HUB_FOLDER_NAME = "Business App Hub"
 FONT_FAMILY = "Georgia"
 APP_DATA_FOLDER = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Business App Hub"
@@ -118,6 +118,18 @@ COLORS = {
 }
 
 VERSION_HISTORY = (
+    {
+        "version": "0.1.7",
+        "name": "Shortcut and Release Notes Polish",
+        "date": "2026-07-24",
+        "changes": (
+            "Added a first-run prompt that helps users create a Desktop shortcut from a smart Desktop folder guess.",
+            "Kept app release notes collapsed by default after two entries, with Load More restoring the current scroll position.",
+            "Made expanded release notes collapse again after leaving and reopening an app page.",
+            "Changed installed-version actions to say Repair, while newer releases say Update and older releases say Change Version.",
+            "Improved mousewheel scrolling over app pages, settings, forms, and cards.",
+        ),
+    },
     {
         "version": "0.1.6",
         "name": "Safety and Polish Update",
@@ -1527,8 +1539,24 @@ def running_app_shortcut_target(
     return Path(sys.executable), arguments, script.parent.parent
 
 
-def desktop_shortcut_path() -> Path:
-    desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
+def smart_desktop_folder() -> Path:
+    user_profile = Path(os.environ.get("USERPROFILE", str(Path.home())))
+    candidates = [
+        user_profile / "Desktop",
+        Path.home() / "Desktop",
+    ]
+    for env_name in ("OneDriveCommercial", "OneDrive"):
+        env_value = os.environ.get(env_name, "").strip()
+        if env_value:
+            candidates.append(Path(env_value) / "Desktop")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return normalize_path(candidate)
+    return normalize_path(candidates[0])
+
+
+def desktop_shortcut_path(desktop_folder: Path | None = None) -> Path:
+    desktop = desktop_folder or smart_desktop_folder()
     return desktop / f"{APP_NAME}.lnk"
 
 
@@ -1573,9 +1601,14 @@ def create_windows_shortcut(
     return shortcut_path
 
 
-def create_desktop_shortcut_file() -> Path:
+def create_desktop_shortcut_file(desktop_folder: Path | None = None) -> Path:
     target, arguments, working_dir = running_app_shortcut_target()
-    return create_windows_shortcut(desktop_shortcut_path(), target, arguments, working_dir)
+    return create_windows_shortcut(
+        desktop_shortcut_path(desktop_folder),
+        target,
+        arguments,
+        working_dir,
+    )
 
 
 def create_app_desktop_shortcut_file(
@@ -2446,6 +2479,9 @@ class SteamStyleBusinessAppHub(tk.Tk):
         self.available_hub_release_asset_url = ""
         self.available_hub_release_asset_name = ""
         self.app_update_flash_on = False
+        self.expanded_release_updates: set[str] = set()
+        self.current_detail_canvas: tk.Canvas | None = None
+        self.shortcut_prompt_open = False
 
         self.path_text = tk.StringVar()
         self.status_text = tk.StringVar(value="Choose the Business App Hub folder.")
@@ -2481,6 +2517,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         self.after(20, self.open_full_screen)
         self.after(100, self.start_folder_discovery)
         self.after(450, self.show_current_version_notes_once)
+        self.after(900, self.show_first_run_shortcut_prompt_once)
         self.after(1200, self.check_github_updates_on_startup)
         self.after(650, self.pulse_app_update_alert)
 
@@ -2849,6 +2886,8 @@ class SteamStyleBusinessAppHub(tk.Tk):
     def switch_view(self, view: str) -> None:
         if view in getattr(self, "admin_nav_views", set()) and not self.device_admin.get():
             view = "settings"
+        if view != "detail":
+            self.expanded_release_updates.clear()
         self.current_view = view
         if view in ("my", "find", "publish", "guide", "history", "settings"):
             self.detail_back_view = view
@@ -3019,6 +3058,150 @@ class SteamStyleBusinessAppHub(tk.Tk):
             return
         entry = self.current_version_history_entry()
         self.show_version_notes_popup(entry, seen_key)
+
+    def show_first_run_shortcut_prompt_once(self) -> None:
+        settings = app_data_settings()
+        if settings.get("first_run_shortcut_prompt_seen"):
+            return
+        if not getattr(sys, "frozen", False) or not sys.platform.startswith("win"):
+            return
+        if self.shortcut_prompt_open:
+            return
+        if self.grab_current() is not None:
+            self.after(700, self.show_first_run_shortcut_prompt_once)
+            return
+
+        default_folder = smart_desktop_folder()
+        try:
+            if desktop_shortcut_path(default_folder).exists():
+                settings["first_run_shortcut_prompt_seen"] = True
+                save_app_data_settings(settings)
+                return
+        except OSError:
+            pass
+
+        self.shortcut_prompt_open = True
+        desktop_text = tk.StringVar(value=str(default_folder))
+        popup = tk.Toplevel(self)
+        popup.title("Create Desktop Shortcut")
+        popup.configure(bg=COLORS["background"])
+        popup.transient(self)
+        popup.grab_set()
+        popup.resizable(False, False)
+        popup.columnconfigure(0, weight=1)
+
+        body = tk.Frame(
+            popup,
+            bg=COLORS["background"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            padx=24,
+            pady=22,
+        )
+        body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+
+        tk.Label(
+            body,
+            text="Create a Desktop shortcut?",
+            bg=COLORS["background"],
+            fg=COLORS["text"],
+            font=(FONT_FAMILY, 17, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        tk.Label(
+            body,
+            text=(
+                "This keeps the app files in their install folder and puts only a shortcut "
+                "on the Desktop. You can change the Desktop folder below."
+            ),
+            bg=COLORS["background"],
+            fg=COLORS["muted"],
+            font=(FONT_FAMILY, 10),
+            justify="left",
+            wraplength=620,
+        ).grid(row=1, column=0, sticky="ew", pady=(8, 16))
+
+        path_row = tk.Frame(body, bg=COLORS["background"])
+        path_row.grid(row=2, column=0, sticky="ew")
+        path_row.columnconfigure(1, weight=1)
+        tk.Label(
+            path_row,
+            text="Desktop folder",
+            bg=COLORS["background"],
+            fg=COLORS["text"],
+            font=(FONT_FAMILY, 9, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        ttk.Entry(
+            path_row,
+            textvariable=desktop_text,
+            style="Dark.TEntry",
+            width=68,
+        ).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+
+        def browse_desktop_folder() -> None:
+            folder = filedialog.askdirectory(
+                title="Choose Desktop folder",
+                initialdir=desktop_text.get().strip() or str(default_folder),
+            )
+            if folder:
+                desktop_text.set(folder)
+
+        self.portal_button(
+            path_row,
+            "Browse",
+            browse_desktop_folder,
+            compact=True,
+            subtle=True,
+        ).grid(row=0, column=2, sticky="e")
+
+        button_row = tk.Frame(body, bg=COLORS["background"])
+        button_row.grid(row=3, column=0, sticky="e", pady=(18, 0))
+
+        def mark_seen_and_close() -> None:
+            saved_settings = app_data_settings()
+            saved_settings["first_run_shortcut_prompt_seen"] = True
+            save_app_data_settings(saved_settings)
+            self.shortcut_prompt_open = False
+            popup.destroy()
+
+        def create_shortcut_from_prompt() -> None:
+            raw_folder = desktop_text.get().strip()
+            folder = Path(os.path.expandvars(raw_folder)).expanduser()
+            if not folder.is_dir():
+                messagebox.showerror(
+                    APP_NAME,
+                    "Choose an existing Desktop folder before creating the shortcut.",
+                )
+                return
+            try:
+                shortcut_path = create_desktop_shortcut_file(normalize_path(folder))
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, f"Could not create Desktop shortcut:\n\n{exc}")
+                return
+            mark_seen_and_close()
+            messagebox.showinfo(APP_NAME, f"Desktop shortcut created:\n\n{shortcut_path}")
+
+        self.portal_button(
+            button_row,
+            "Skip",
+            mark_seen_and_close,
+            subtle=True,
+        ).grid(row=0, column=0, padx=(0, 10))
+        self.portal_button(
+            button_row,
+            "Create Shortcut",
+            create_shortcut_from_prompt,
+            accent=True,
+        ).grid(row=0, column=1)
+
+        popup.update_idletasks()
+        width = popup.winfo_width()
+        height = popup.winfo_height()
+        x = self.winfo_rootx() + max((self.winfo_width() - width) // 2, 0)
+        y = self.winfo_rooty() + max((self.winfo_height() - height) // 2, 0)
+        popup.geometry(f"+{x}+{y}")
+        popup.protocol("WM_DELETE_WINDOW", mark_seen_and_close)
 
     def show_version_notes_popup(self, entry: dict[str, object], seen_key: str) -> None:
         changes = entry.get("changes", ())
@@ -4540,9 +4723,21 @@ class SteamStyleBusinessAppHub(tk.Tk):
         def on_scroll_drag(event: tk.Event) -> None:
             move_thumb_to(event.y - thumb_drag_offset)
 
-        def on_mousewheel(event: tk.Event) -> None:
+        def on_mousewheel(event: tk.Event) -> str:
             delta = int(-1 * (event.delta / 120)) if event.delta else 0
             canvas.yview_scroll(delta, "units")
+            return "break"
+
+        mousewheel_bound_widgets: set[str] = set()
+
+        def bind_mousewheel_tree(widget: tk.Widget) -> None:
+            widget_id = str(widget)
+            if widget_id in mousewheel_bound_widgets:
+                return
+            mousewheel_bound_widgets.add(widget_id)
+            widget.bind("<MouseWheel>", on_mousewheel, add="+")
+            for child in widget.winfo_children():
+                bind_mousewheel_tree(child)
 
         def set_thumb_hover(is_hovered: bool) -> None:
             nonlocal thumb_hovered
@@ -4558,14 +4753,15 @@ class SteamStyleBusinessAppHub(tk.Tk):
             canvas.configure(scrollregion=canvas.bbox("all"))
             first, last = canvas.yview()
             draw_thumb(first, last)
+            bind_mousewheel_tree(inner)
 
         canvas.configure(yscrollcommand=set_scrollbar)
         scroll_canvas.bind("<Button-1>", on_scroll_press)
         scroll_canvas.bind("<B1-Motion>", on_scroll_drag)
         scroll_canvas.bind("<Enter>", lambda _event: set_thumb_hover(True))
         scroll_canvas.bind("<Leave>", lambda _event: set_thumb_hover(False))
-        canvas.bind("<MouseWheel>", on_mousewheel)
-        inner.bind("<MouseWheel>", on_mousewheel)
+        canvas.bind("<MouseWheel>", on_mousewheel, add="+")
+        inner.bind("<MouseWheel>", on_mousewheel, add="+")
 
         def on_inner_configure(_event: tk.Event) -> None:
             sync_canvas_window()
@@ -4703,6 +4899,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         if app is None:
             return
         self.selected_app_id = app_id
+        self.expanded_release_updates.clear()
         self.detail_version_text.set("")
         if self.current_view in ("find", "my"):
             self.detail_back_view = self.current_view
@@ -4745,6 +4942,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
         panel.rowconfigure(0, weight=1)
 
         _canvas, inner = self.scroll_area(panel, row=0)
+        self.current_detail_canvas = _canvas
         inner.columnconfigure(0, weight=1)
         page = tk.Frame(inner, bg=COLORS["panel"])
         page.grid(row=0, column=0, sticky="new", padx=58, pady=(6, 28))
@@ -4944,72 +5142,154 @@ class SteamStyleBusinessAppHub(tk.Tk):
             ).grid(row=0, column=0, sticky="w")
             return
         installed_record = self.install_record_for(app)
-        for row, release in enumerate(releases, start=1):
-            card = tk.Frame(
-                parent,
-                bg=COLORS["panel_alt"],
-                highlightbackground=COLORS["border"],
-                highlightthickness=1,
-                padx=16,
-                pady=13,
-            )
-            card.grid(row=row, column=0, sticky="ew", pady=(0, 10))
-            card.columnconfigure(1, weight=1)
+        expanded = app.app_id in self.expanded_release_updates
+        visible_releases = releases if expanded or len(releases) <= 2 else releases[:2]
+        for row, release in enumerate(visible_releases, start=1):
+            self.render_single_release_update_card(parent, app, release, installed_record, row)
 
-            media = tk.Frame(card, bg=COLORS["panel_alt"])
-            media.grid(row=0, column=0, rowspan=3, sticky="nw", padx=(0, 16))
-            image = self.load_release_image(app, release, 150)
-            if image:
-                tk.Label(
-                    media,
-                    image=image,
-                    bg=COLORS["panel_alt"],
-                    width=160,
-                    height=96,
-                ).grid(row=0, column=0, sticky="nw")
+        if not expanded and len(releases) > 2:
+            preview_row = len(visible_releases) + 1
+            self.render_release_load_more_card(parent, app, releases[2], len(releases) - 2, preview_row)
 
-            badge_bg = COLORS["accent"] if release.version == app.default_version else COLORS["panel_high"]
+    def render_single_release_update_card(
+        self,
+        parent: tk.Widget,
+        app: HubApp,
+        release: AppRelease,
+        installed_record: InstallRecord | None,
+        row: int,
+    ) -> None:
+        card = tk.Frame(
+            parent,
+            bg=COLORS["panel_alt"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            padx=16,
+            pady=13,
+        )
+        card.grid(row=row, column=0, sticky="ew", pady=(0, 10))
+        card.columnconfigure(1, weight=1)
+
+        media = tk.Frame(card, bg=COLORS["panel_alt"])
+        media.grid(row=0, column=0, rowspan=3, sticky="nw", padx=(0, 16))
+        image = self.load_release_image(app, release, 150)
+        if image:
             tk.Label(
                 media,
-                text=release.version,
-                bg=badge_bg,
-                fg=COLORS["background"] if release.version == app.default_version else COLORS["text"],
-                font=(FONT_FAMILY, 10, "bold"),
-                padx=12,
-                pady=7,
-            ).grid(row=1 if image else 0, column=0, sticky="w", pady=(8 if image else 0, 0))
+                image=image,
+                bg=COLORS["panel_alt"],
+                width=160,
+                height=96,
+            ).grid(row=0, column=0, sticky="nw")
 
-            title = release.update_name or f"Release {release.version}"
-            title_bits = [title]
-            if release.date:
-                title_bits.append(release.date)
-            if release.version == app.default_version:
-                title_bits.append("Default")
-            if installed_record is not None and installed_record.version == release.version:
-                title_bits.append("Installed")
-            tk.Label(
-                card,
-                text="  |  ".join(title_bits),
-                bg=COLORS["panel_alt"],
-                fg=COLORS["text"],
-                font=(FONT_FAMILY, 11, "bold"),
-                anchor="w",
-            ).grid(row=0, column=1, sticky="ew")
-            detail = (
-                release.update_description
-                or release.notes
-                or "No detailed update notes were added for this release."
-            )
-            tk.Label(
-                card,
-                text=detail,
-                bg=COLORS["panel_alt"],
-                fg=COLORS["muted"],
-                font=(FONT_FAMILY, 9),
-                wraplength=980 if image else 1120,
-                justify="left",
-                anchor="w",
-            ).grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        badge_bg = COLORS["accent"] if release.version == app.default_version else COLORS["panel_high"]
+        tk.Label(
+            media,
+            text=release.version,
+            bg=badge_bg,
+            fg=COLORS["background"] if release.version == app.default_version else COLORS["text"],
+            font=(FONT_FAMILY, 10, "bold"),
+            padx=12,
+            pady=7,
+        ).grid(row=1 if image else 0, column=0, sticky="w", pady=(8 if image else 0, 0))
+
+        title = release.update_name or f"Release {release.version}"
+        title_bits = [title]
+        if release.date:
+            title_bits.append(release.date)
+        if release.version == app.default_version:
+            title_bits.append("Default")
+        if installed_record is not None and installed_record.version == release.version:
+            title_bits.append("Installed")
+        tk.Label(
+            card,
+            text="  |  ".join(title_bits),
+            bg=COLORS["panel_alt"],
+            fg=COLORS["text"],
+            font=(FONT_FAMILY, 11, "bold"),
+            anchor="w",
+        ).grid(row=0, column=1, sticky="ew")
+        detail = (
+            release.update_description
+            or release.notes
+            or "No detailed update notes were added for this release."
+        )
+        tk.Label(
+            card,
+            text=detail,
+            bg=COLORS["panel_alt"],
+            fg=COLORS["muted"],
+            font=(FONT_FAMILY, 9),
+            wraplength=980 if image else 1120,
+            justify="left",
+            anchor="w",
+        ).grid(row=1, column=1, sticky="ew", pady=(6, 0))
+
+    def render_release_load_more_card(
+        self,
+        parent: tk.Widget,
+        app: HubApp,
+        release: AppRelease,
+        remaining_count: int,
+        row: int,
+    ) -> None:
+        preview = tk.Frame(
+            parent,
+            bg=COLORS["card"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+            padx=16,
+            pady=11,
+            height=86,
+        )
+        preview.grid(row=row, column=0, sticky="ew", pady=(0, 10))
+        preview.grid_propagate(False)
+        preview.columnconfigure(0, weight=1)
+
+        title = release.update_name or f"Release {release.version}"
+        if release.date:
+            title = f"{title}  |  {release.date}"
+        tk.Label(
+            preview,
+            text=title,
+            bg=COLORS["card"],
+            fg=COLORS["muted"],
+            font=(FONT_FAMILY, 10, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        detail = release.update_description or release.notes or "More release notes are available."
+        tk.Label(
+            preview,
+            text=detail,
+            bg=COLORS["card"],
+            fg="#59667d",
+            font=(FONT_FAMILY, 9),
+            wraplength=1120,
+            justify="left",
+            anchor="w",
+        ).grid(row=1, column=0, sticky="ew", pady=(5, 0))
+
+        overlay = tk.Frame(preview, bg=COLORS["card"])
+        overlay.place(relx=0, rely=0.42, relwidth=1, relheight=0.58)
+        self.portal_button(
+            overlay,
+            f"Load More ({remaining_count})",
+            lambda app_id=app.app_id: self.show_all_release_updates(app_id),
+            accent=True,
+        ).place(relx=0.5, rely=0.5, anchor="center")
+
+    def show_all_release_updates(self, app_id: str) -> None:
+        canvas = self.current_detail_canvas
+        scroll_position = canvas.yview()[0] if canvas is not None else 0.0
+        self.expanded_release_updates.add(app_id)
+        self.render_current_view()
+
+        def restore_scroll() -> None:
+            if self.current_detail_canvas is not None:
+                self.current_detail_canvas.yview_moveto(scroll_position)
+
+        self.after_idle(restore_scroll)
+        self.after(30, restore_scroll)
 
     def load_release_image(
         self,
@@ -5052,7 +5332,7 @@ class SteamStyleBusinessAppHub(tk.Tk):
             if is_newer_version(selected_version, record.version):
                 return "Update"
             return "Change Version"
-        return "Update / Repair"
+        return "Repair"
 
     def queue_download(self, app: HubApp, version: str = "") -> None:
         selected_version = version.strip() or self.default_detail_version(app)
